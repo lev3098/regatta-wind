@@ -1,0 +1,21 @@
+# Runs the regatta WRF forecast inside the NCAR WRF container.
+# The image `wrf_local` is built once from NCAR/WRF_DOCKER (see README.md) — it
+# bundles WRF, WPS and WPS_GEOG, so no separate 50 GB geography download.
+#
+#   docker compose run --rm wrf            # 9→3 km (default)
+#   MAX_DOM=3 docker compose run --rm wrf   # add the 1 km nest (overnight)
+
+services:
+  wrf:
+    image: wrf_local
+    container_name: regatta_wrf
+    working_dir: /wrf
+    environment:
+      RUN_HOURS: "${RUN_HOURS:-12}"
+      MAX_DOM: "${MAX_DOM:-2}"
+      NP: "${NP:-4}"
+    volumes:
+      - ./gfs:/wrf/gfs                 # GFS boundary data (download_gfs.sh)
+      - ./output:/wrf/wrfoutput        # wrfout lands here → app reads it
+      - ./:/wrf/regatta                # namelists + run_forecast.sh
+    command: ["/bin/bash", "/wrf/regatta/run_forecast.sh"]

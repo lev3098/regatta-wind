@@ -1,98 +1,102 @@
-"""CLI: таблица ветра по точкам дистанции."""
+"""CLI: wind table per race mark, from local WRF or the Open-Meteo fallback."""
 
 from __future__ import annotations
 
 import argparse
+import os
 from datetime import datetime, timedelta
 
 from rich.console import Console
 from rich.table import Table
 
-from .config import RaceConfig, load_config
-from .models import WaypointForecast
-from .openmeteo import fetch_forecasts
 from . import tactics
+from .config import RaceConfig, load_config
+from .models import FineField, Waypoint
+from .sources import wrf as wrfsrc
+from .sources.openmeteo import fetch_fallback_field
 
 console = Console()
 
 
-def _build_table(fc: WaypointForecast, cfg: RaceConfig) -> Table:
-    dist = tactics.haversine_km(
-        fc.waypoint.lat, fc.waypoint.lon, fc.grid_lat, fc.grid_lon
-    )
-    title = (
-        f"[bold]{fc.waypoint.name}[/]  "
-        f"[dim]({fc.waypoint.lat:.3f}, {fc.waypoint.lon:.3f}  "
-        f"→ узел сетки {dist:.1f} км)[/]"
-    )
+def _resolve_field(cfg: RaceConfig, source: str) -> FineField:
+    """auto → WRF if a wrfout exists, else Open-Meteo fallback."""
+    hours = cfg.forecast.hours_ahead
+    unit = cfg.forecast.wind_speed_unit
+
+    if source in ("auto", "wrf"):
+        path = wrfsrc.find_wrfout(cfg.wrf.output_dir, cfg.wrf.domain)
+        if path:
+            console.print(f"[dim]WRF: {os.path.basename(path)}[/]")
+            return wrfsrc.read_wrfout(path, timezone_name=cfg.timezone,
+                                      wind_speed_unit=unit, domain=cfg.wrf.domain,
+                                      hours_ahead=hours)
+        if source == "wrf":
+            raise SystemExit(
+                f"Нет wrfout_{cfg.wrf.domain}_* в {cfg.wrf.output_dir}. "
+                "Запусти батч WRF (wrf/README.md) или используй --source open-meteo."
+            )
+    return fetch_fallback_field(cfg.area, cfg.forecast, cfg.timezone)
+
+
+def _build_table(field: FineField, w: Waypoint, idx: int, cfg: RaceConfig) -> Table:
+    samples = field.sample_series(w.lat, w.lon)
+    i, j = field.nearest_index(w.lat, w.lon)
+    dist = tactics.haversine_km(w.lat, w.lon, float(field.terrain.lat[i, j]),
+                                float(field.terrain.lon[i, j]))
+    title = (f"[bold]{idx + 1}. {w.name}[/]  "
+             f"[dim]({w.lat:.3f}, {w.lon:.3f} → узел {field.grid_km:g} км: {dist:.2f} км)[/]")
 
     table = Table(title=title, title_justify="left", header_style="bold cyan")
-    table.add_column("Время", no_wrap=True)
-    table.add_column("Напр.", justify="right")
-    table.add_column("Румб", justify="center")
-    table.add_column("Ветер, kn", justify="right")
-    table.add_column("Поры́в, kn", justify="right")
-    table.add_column("Заход", justify="left")
+    for col, just in (("Время", "left"), ("Напр.", "right"), ("Румб", "center"),
+                      ("Ветер, kn", "right"), ("Поры́в, kn", "right"), ("Заход", "left")):
+        table.add_column(col, justify=just, no_wrap=(col == "Время"))
 
-    tz = fc.samples[0].time.tzinfo if fc.samples else None
+    tz = samples[0].time.tzinfo if samples else None
     now = datetime.now(tz) if tz else datetime.now().astimezone()
-    win_lo, win_hi = cfg.forecast.tactical_window
-    win_start = now + timedelta(hours=win_lo)
-    win_end = now + timedelta(hours=win_hi)
+    win_start = now + timedelta(hours=cfg.forecast.tactical_window[0])
+    win_end = now + timedelta(hours=cfg.forecast.tactical_window[1])
 
-    prev_dir: float | None = None
-    for s in fc.samples:
-        delta = tactics.shift(prev_dir, s.direction_deg) if prev_dir is not None else 0.0
-        prev_dir = s.direction_deg
-
-        arrow = tactics.shift_arrow(delta) if delta else ""
-        row_style = None
-        if s.time < now:
-            row_style = "dim"                   # модельное прошлое
-        elif win_start <= s.time <= win_end:
-            row_style = "bold yellow"           # тактическое окно 3–5 ч
-
+    prev: float | None = None
+    for s in samples:
+        delta = tactics.shift(prev, s.direction_deg) if prev is not None else 0.0
+        prev = s.direction_deg
+        style = "dim" if s.time < now else ("bold yellow" if win_start <= s.time <= win_end else None)
         table.add_row(
-            s.time.strftime("%H:%M"),
-            f"{s.direction_deg:.0f}°",
-            tactics.compass(s.direction_deg),
-            f"{s.speed_kn:.1f}",
-            f"{s.gust_kn:.1f}" if s.gust_kn == s.gust_kn else "—",
-            arrow,
-            style=row_style,
+            s.time.strftime("%H:%M"), f"{s.direction_deg:.0f}°", tactics.compass(s.direction_deg),
+            f"{s.speed_kn:.1f}", f"{s.gust_kn:.1f}" if s.gust_kn == s.gust_kn else "—",
+            tactics.shift_arrow(delta) if delta else "", style=style,
         )
 
-    amp = tactics.oscillation_range([s for s in fc.samples if s.time >= now])
-    table.caption = f"[dim]Амплитуда колебаний направления (будущее): {amp:.0f}°[/]"
+    amp = tactics.oscillation_range([s for s in samples if s.time >= now])
+    table.caption = f"[dim]Амплитуда направления (будущее): {amp:.0f}°[/]"
     table.caption_justify = "left"
     return table
 
 
-def run(route_path: str) -> None:
+def run(route_path: str, source: str) -> None:
     cfg = load_config(route_path)
+    field = _resolve_field(cfg, source)
     console.print(f"\n[bold green]{cfg.name}[/]")
-    console.print(
-        f"[dim]Модель {cfg.forecast.model} · единицы {cfg.forecast.wind_speed_unit} · "
-        f"TZ {cfg.timezone}[/]\n"
-    )
+    trust = "" if field.trusted else "  [yellow](грубый фолбэк — опирайся на WRF)[/]"
+    console.print(f"[dim]{field.source} · сетка {field.grid_km:g} км · TZ {cfg.timezone}[/]{trust}\n")
 
-    forecasts = fetch_forecasts(cfg.waypoints, cfg.forecast, cfg.timezone)
-    for fc in forecasts:
-        console.print(_build_table(fc, cfg))
+    if not cfg.waypoints:
+        console.print("[yellow]В маршруте нет знаков. Добавь их в YAML или в веб-интерфейсе.[/]")
+        return
+    for idx, w in enumerate(cfg.waypoints):
+        console.print(_build_table(field, w, idx, cfg))
         console.print()
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Оперативный прогноз ветра (JMA MSM) по точкам дистанции."
+        description="Прогноз ветра по точкам дистанции (локальный WRF или Open-Meteo)."
     )
-    parser.add_argument(
-        "--route",
-        default="config/route.yaml",
-        help="Путь к YAML-маршруту (по умолчанию config/route.yaml).",
-    )
+    parser.add_argument("--route", default="config/route.yaml", help="Путь к YAML-маршруту.")
+    parser.add_argument("--source", default="auto", choices=["auto", "wrf", "open-meteo"],
+                        help="Источник: auto (по умолчанию), wrf, open-meteo.")
     args = parser.parse_args()
-    run(args.route)
+    run(args.route, args.source)
 
 
 if __name__ == "__main__":

@@ -6,3 +6,15 @@ __pycache__/
 dist/
 build/
 .DS_Store
+.pytest_cache/
+.cache/
+
+# WRF batch artefacts (large / machine-local)
+wrf/gfs/
+wrf/output/*
+!wrf/output/.gitkeep
+wrf/.compute*
+*.nc
+wrfout_*
+met_em*
+geo_em*

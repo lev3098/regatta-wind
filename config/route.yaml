@@ -2,23 +2,25 @@ name: Залив Петра Великого — гоночная дистанц
 timezone: Asia/Vladivostok
 
 forecast:
-  model: jma_seamless
+  source: wrf              # wrf | open-meteo  (wrf = локальный высокоразрешающий)
   wind_speed_unit: kn
-  hours_ahead: 24
-  past_hours: 3
-  tactical_window: [3, 5]   # ч от текущего момента → подсветка жёлтым
+  hours_ahead: 12          # горизонт прогноза для гонки
+  tactical_window: [3, 5]  # ч от текущего момента → подсветка жёлтым
+  fallback_model: jma_seamless   # модель Open-Meteo для фолбэка (пока WRF не посчитан)
 
-# Впиши реальные координаты знаков своей дистанции (градусы, десятичные)
+wrf:
+  output_dir: wrf/output   # куда батч кладёт wrfout_d0X_*
+  domain: d02              # d02 = 3 км, d03 = 1 км (опциональный вложенный)
+
+area:
+  center_lat: 43.08        # центр области прогноза (рамка на карте + сетка фолбэка)
+  center_lon: 131.88
+  half_span_deg: 0.30      # ≈ 33 км полуширина
+
+# Знаки удобнее ставить кликом на вкладке «Маршрут» и сохранять отсюда же.
+# Здесь — стартовый набор-пример.
 waypoints:
-  - name: Старт
-    lat: 43.115
-    lon: 131.870
-  - name: Знак 1
-    lat: 43.090
-    lon: 131.920
-  - name: Знак 2
-    lat: 43.060
-    lon: 131.880
-  - name: Финиш
-    lat: 43.115
-    lon: 131.870
+  - {name: Старт, lat: 43.115, lon: 131.870}
+  - {name: Знак 1, lat: 43.090, lon: 131.920}
+  - {name: Знак 2, lat: 43.060, lon: 131.880}
+  - {name: Финиш, lat: 43.115, lon: 131.870}

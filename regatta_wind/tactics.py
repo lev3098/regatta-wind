@@ -34,13 +34,24 @@ def shift_arrow(delta: float) -> str:
     return "→" if delta > 0 else "←"
 
 
+def unwrap_directions(dirs: list[float]) -> list[float]:
+    """Unwrap a sequence of compass directions into a continuous curve.
+
+    Avoids the 360°→0° jump so direction can be plotted as a smooth line and
+    oscillation amplitude is meaningful.
+    """
+    if not dirs:
+        return []
+    out = [dirs[0]]
+    for d in dirs[1:]:
+        delta = (d - out[-1] + 180) % 360 - 180
+        out.append(out[-1] + delta)
+    return out
+
+
 def oscillation_range(samples: list[WindSample]) -> float:
     """Peak-to-peak oscillation of wind direction (unwrapped)."""
     if len(samples) < 2:
         return 0.0
-    dirs = [s.direction_deg for s in samples]
-    unwrapped = [dirs[0]]
-    for d in dirs[1:]:
-        delta = (d - unwrapped[-1] + 180) % 360 - 180
-        unwrapped.append(unwrapped[-1] + delta)
+    unwrapped = unwrap_directions([s.direction_deg for s in samples])
     return max(unwrapped) - min(unwrapped)
