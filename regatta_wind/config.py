@@ -20,20 +20,19 @@ import yaml
 from .models import Waypoint
 
 # Peter the Great Bay (Vladivostok) — the tool's home water.
-# Centre chosen so the validated 1 km WRF nest covers all the named landmarks
-# below (Amur Bay, Ussuri Bay, Slavyansky Bay, the islands) with margin.
-DEFAULT_CENTER_LAT = 43.00
-DEFAULT_CENTER_LON = 131.75
+# Centre = bounding-box centre of the corner landmarks below.
+DEFAULT_CENTER_LAT = 43.03
+DEFAULT_CENTER_LON = 131.85
 
-# Fixed reference landmarks the forecast must cover. These are NOT editable race
-# marks — they orient the map and anchor the OWM observations / per-point charts.
+# Named CORNER points that bound the compute area — the forecast is not needed
+# beyond them. They define the WRF domain extent/centre, NOT OWM stations.
 # Coordinates are approximate; correct any in route.yaml's `landmarks:` block.
 DEFAULT_LANDMARKS: list[Waypoint] = [
-    Waypoint("Мыс Песчаный", 43.34, 131.79),       # запад Амурского залива
-    Waypoint("Бухта Миноносок", 42.71, 131.36),    # Славянский залив
+    Waypoint("Мыс Песчаный", 43.34, 131.79),       # север (запад Амурского залива)
+    Waypoint("Бухта Миноносок", 42.71, 131.36),    # ЮЗ угол (Славянский залив)
     Waypoint("Остров Попова", 42.95, 131.73),      # архипелаг Императрицы Евгении
-    Waypoint("Остров Аскольд", 42.78, 132.34),     # вход в Уссурийский залив
-    Waypoint("Кирпичный завод", 43.23, 132.05),    # север Уссурийского зал. (≈)
+    Waypoint("Остров Аскольд", 42.78, 132.34),     # ЮВ угол (вход в Уссурийский зал.)
+    Waypoint("Кирпичный завод", 43.23, 132.05),    # СВ (север Уссурийского зал.) (≈)
 ]
 
 
@@ -56,7 +55,7 @@ class WrfConfig:
 class AreaConfig:
     center_lat: float = DEFAULT_CENTER_LAT
     center_lon: float = DEFAULT_CENTER_LON
-    half_span_deg: float = 0.75       # covers the whole bay; frames map + fallback grid
+    half_span_deg: float = 0.50       # frames map + fallback grid (compute area ~100 km)
 
     @property
     def bounds(self) -> tuple[float, float, float, float]:
@@ -108,10 +107,17 @@ def load_config(path: str) -> RaceConfig:
     else:
         landmarks = list(DEFAULT_LANDMARKS)
 
+    # Area centre defaults to the corner bounding-box centre, so the WRF compute
+    # always sits on the actual landmarks. An explicit `area:` block still wins.
+    if landmarks:
+        bclat = (min(w.lat for w in landmarks) + max(w.lat for w in landmarks)) / 2
+        bclon = (min(w.lon for w in landmarks) + max(w.lon for w in landmarks)) / 2
+    else:
+        bclat, bclon = DEFAULT_CENTER_LAT, DEFAULT_CENTER_LON
     ar = data.get("area", {})
     area = AreaConfig(
-        center_lat=float(ar.get("center_lat", DEFAULT_CENTER_LAT)),
-        center_lon=float(ar.get("center_lon", DEFAULT_CENTER_LON)),
+        center_lat=float(ar.get("center_lat", bclat)),
+        center_lon=float(ar.get("center_lon", bclon)),
         half_span_deg=float(ar.get("half_span_deg", AreaConfig().half_span_deg)),
     )
 

@@ -15,10 +15,60 @@ import requests
 
 from ..config import AreaConfig, ForecastConfig
 from ..grid import build_latlon_grid
-from ..models import FieldFrame, FineField, TerrainGrid
+from ..models import FieldFrame, FineField, TerrainGrid, WindSample
 
 BASE_URL = "https://api.open-meteo.com/v1/forecast"
 HOURLY_VARS = "wind_speed_10m,wind_direction_10m,wind_gusts_10m"
+CURRENT_VARS = "wind_speed_10m,wind_direction_10m,wind_gusts_10m"
+
+
+def sample_current_grid(
+    bounds: tuple[float, float, float, float],
+    n: int = 3,
+    *,
+    unit: str = "kn",
+    timeout: float = 30.0,
+) -> list[tuple[float, float, WindSample]]:
+    """Open-Meteo *current* wind on an n×n grid inset inside ``bounds``.
+
+    A free, keyless second observation-ish source for the bias correction.
+    Returns [(lat, lon, sample), …]; [] on failure.
+    """
+    lat_lo, lat_hi, lon_lo, lon_hi = bounds
+    pad_lat = (lat_hi - lat_lo) * 0.12
+    pad_lon = (lon_hi - lon_lo) * 0.12
+    lats = [lat_lo + pad_lat + (lat_hi - lat_lo - 2 * pad_lat) * i / max(n - 1, 1) for i in range(n)]
+    lons = [lon_lo + pad_lon + (lon_hi - lon_lo - 2 * pad_lon) * j / max(n - 1, 1) for j in range(n)]
+    coords = [(la, lo) for la in lats for lo in lons]
+    params = {
+        "latitude": ",".join(f"{la:.4f}" for la, _ in coords),
+        "longitude": ",".join(f"{lo:.4f}" for _, lo in coords),
+        "current": CURRENT_VARS,
+        "wind_speed_unit": unit,
+    }
+    try:
+        resp = requests.get(BASE_URL, params=params, timeout=timeout)
+        resp.raise_for_status()
+    except requests.RequestException:
+        return []
+    payload = resp.json()
+    blocks = payload if isinstance(payload, list) else [payload]
+    out: list[tuple[float, float, WindSample]] = []
+    for (la, lo), block in zip(coords, blocks):
+        cur = block.get("current") or {}
+        sp, di = cur.get("wind_speed_10m"), cur.get("wind_direction_10m")
+        if sp is None or di is None:
+            continue
+        gu = cur.get("wind_gusts_10m")
+        off = timezone(timedelta(seconds=int(block.get("utc_offset_seconds", 0))))
+        try:
+            t = datetime.fromisoformat(cur["time"]).replace(tzinfo=off)
+        except (KeyError, ValueError):
+            t = datetime.now(timezone.utc)
+        out.append((round(la, 4), round(lo, 4),
+                    WindSample(time=t, speed_kn=float(sp), direction_deg=float(di),
+                               gust_kn=float(gu if gu is not None else sp), confidence=0.8)))
+    return out
 
 
 def fetch_fallback_field(

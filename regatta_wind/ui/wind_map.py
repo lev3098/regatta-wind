@@ -105,12 +105,13 @@ def _raster_overlay(field: FineField, speed: np.ndarray, vmax: float, alpha: flo
 def build_figure(
     field: FineField,
     idx: int,
-    waypoints: list[Waypoint],
+    corners: list[Waypoint],
     *,
     vmax: int = 30,
     alpha: float = 0.6,
     arrows: int = 28,
-    owm_obs: list[WindSample | None] | None = None,
+    owm_points: list[tuple[float, float, WindSample]] | None = None,
+    bounds: tuple[float, float, float, float] | None = None,
 ) -> go.Figure:
     terrain = field.terrain
     lat2d, lon2d = terrain.lat, terrain.lon
@@ -188,37 +189,37 @@ def build_figure(
                           "<br>порыв %{customdata[2]:.1f} уз<extra></extra>",
             showlegend=False))
 
-    # fixed reference landmarks (named points the forecast must cover) — no route line
-    if waypoints:
-        fig.add_trace(go.Scattermapbox(lat=[w.lat for w in waypoints],
-            lon=[w.lon for w in waypoints], mode="markers+text",
-            marker=dict(size=8, color="rgba(255,255,255,0.95)"),
-            text=[w.name for w in waypoints], textposition="top center",
-            textfont=dict(color="rgba(255,255,255,0.92)", size=10),
-            hovertext=[w.name for w in waypoints], hoverinfo="text",
-            name="ориентиры", showlegend=False))
+    # compute-boundary rectangle (forecast is not needed beyond it)
+    if bounds is not None:
+        lo_a, hi_a, lo_o, hi_o = bounds
+        fig.add_trace(go.Scattermapbox(
+            lat=[lo_a, lo_a, hi_a, hi_a, lo_a], lon=[lo_o, hi_o, hi_o, lo_o, lo_o],
+            mode="lines", line=dict(color="rgba(255,255,255,0.55)", width=1.5),
+            hoverinfo="skip", showlegend=False))
 
-    # OWM current obs at each waypoint
-    if waypoints and owm_obs:
-        owm_lats, owm_lons, owm_text, owm_hover = [], [], [], []
-        for w, obs in zip(waypoints, owm_obs):
-            if obs is None:
-                continue
-            compass_dir = _compass_short(obs.direction_deg)
-            owm_lats.append(w.lat)
-            owm_lons.append(w.lon)
-            owm_text.append(f"{obs.speed_kn:.0f}")
-            owm_hover.append(
-                f"{w.name}<br>OWM сейчас: {obs.speed_kn:.1f} kn · {obs.direction_deg:.0f}° {compass_dir}"
-                f"<br>порыв {obs.gust_kn:.1f} kn"
-            )
-        if owm_lats:
+    # corner reference points (the named limits of the compute area) — small ticks
+    if corners:
+        fig.add_trace(go.Scattermapbox(lat=[w.lat for w in corners],
+            lon=[w.lon for w in corners], mode="markers+text",
+            marker=dict(size=7, color="rgba(255,255,255,0.9)"),
+            text=[w.name for w in corners], textposition="top center",
+            textfont=dict(color="rgba(255,255,255,0.85)", size=9),
+            hovertext=[w.name for w in corners], hoverinfo="text", showlegend=False))
+
+    # OpenWeatherMap observations sampled across the area (real wind, not the corners)
+    if owm_points:
+        o_lat, o_lon, o_txt, o_hov = [], [], [], []
+        for plat, plon, obs in owm_points:
+            o_lat.append(plat); o_lon.append(plon)
+            o_txt.append(f"{obs.speed_kn:.0f}")
+            o_hov.append(f"OWM: {obs.speed_kn:.1f} kn · {obs.direction_deg:.0f}° "
+                         f"{_compass_short(obs.direction_deg)}<br>порыв {obs.gust_kn:.1f} kn")
+        if o_lat:
             fig.add_trace(go.Scattermapbox(
-                lat=owm_lats, lon=owm_lons, mode="markers+text",
-                marker=dict(size=20, color="#FF9800", opacity=0.85),
-                text=owm_text, textfont=dict(color="white", size=10),
-                hovertext=owm_hover, hoverinfo="text",
-                name="OWM сейчас", showlegend=True))
+                lat=o_lat, lon=o_lon, mode="markers+text",
+                marker=dict(size=18, color="#FF9800", opacity=0.85),
+                text=o_txt, textfont=dict(color="white", size=9),
+                hovertext=o_hov, hoverinfo="text", name="OWM", showlegend=True))
 
     fig.update_layout(
         mapbox=dict(style="carto-darkmatter",
@@ -230,12 +231,13 @@ def build_figure(
 
 def render(
     field: FineField,
-    waypoints: list[Waypoint],
+    corners: list[Waypoint],
     *,
     vmax: int,
     alpha: float,
     arrows: int,
-    owm_obs: list[WindSample | None] | None = None,
+    owm_points: list[tuple[float, float, WindSample]] | None = None,
+    bounds: tuple[float, float, float, float] | None = None,
 ) -> None:
     times = field.times
     if not times:
@@ -244,12 +246,15 @@ def render(
     tz = times[0].tzinfo
     now = datetime.now(tz)
     default_idx = min(range(len(times)), key=lambda i: abs((times[i] - now).total_seconds()))
-    idx = st.select_slider("⏱ Час прогноза", options=list(range(len(times))),
-        value=default_idx, format_func=lambda i: times[i].strftime("%d %b %H:%M"))
+    if len(times) == 1:
+        idx = 0  # a single forecast hour: no slider (avoids a min==max range error)
+    else:
+        idx = st.select_slider("⏱ Час прогноза", options=list(range(len(times))),
+            value=default_idx, format_func=lambda i: times[i].strftime("%d %b %H:%M"))
     sel = times[idx]
     dh = (sel - now).total_seconds() / 3600
     when = "сейчас" if abs(dh) < 0.5 else (f"{abs(dh):.0f} ч назад" if dh < 0 else f"через {dh:.0f} ч")
     st.caption(f"**{sel.strftime('%d %b %H:%M')}** · {when}")
-    fig = build_figure(field, idx, waypoints, vmax=vmax, alpha=alpha, arrows=arrows,
-                       owm_obs=owm_obs)
+    fig = build_figure(field, idx, corners, vmax=vmax, alpha=alpha, arrows=arrows,
+                       owm_points=owm_points, bounds=bounds)
     st.plotly_chart(fig, width="stretch", key="wind_field_map")

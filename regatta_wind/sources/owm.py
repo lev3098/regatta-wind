@@ -60,6 +60,35 @@ def fetch_current(lat: float, lon: float, *, timeout: float = 10.0) -> WindSampl
     )
 
 
+def sample_grid(
+    bounds: tuple[float, float, float, float],
+    n: int = 3,
+) -> list[tuple[float, float, WindSample]]:
+    """Current OWM obs on an n×n grid inset inside ``bounds`` (lat_lo,lat_hi,lon_lo,lon_hi).
+
+    Independent of the named corner points — gives real wind spread across the area.
+    Returns [(lat, lon, sample), …]; skips points that fail. [] if no key.
+    """
+    if not api_key():
+        return []
+    lat_lo, lat_hi, lon_lo, lon_hi = bounds
+    # inset so samples sit inside the area, not on the very edge
+    pad_lat = (lat_hi - lat_lo) * 0.12
+    pad_lon = (lon_hi - lon_lo) * 0.12
+    lats = [lat_lo + pad_lat + (lat_hi - lat_lo - 2 * pad_lat) * i / max(n - 1, 1) for i in range(n)]
+    lons = [lon_lo + pad_lon + (lon_hi - lon_lo - 2 * pad_lon) * j / max(n - 1, 1) for j in range(n)]
+    out: list[tuple[float, float, WindSample]] = []
+    for la in lats:
+        for lo in lons:
+            try:
+                s = fetch_current(la, lo)
+            except Exception:  # noqa: BLE001
+                s = None
+            if s is not None:
+                out.append((round(la, 4), round(lo, 4), s))
+    return out
+
+
 def fetch_forecast(
     lat: float,
     lon: float,

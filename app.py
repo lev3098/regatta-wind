@@ -17,8 +17,10 @@ from zoneinfo import ZoneInfo
 
 import streamlit as st
 
+from regatta_wind import correct
 from regatta_wind.config import AreaConfig, ForecastConfig, load_config
-from regatta_wind.models import FineField, WindSample
+from regatta_wind.models import FineField
+from regatta_wind.sources import openmeteo as omsrc
 from regatta_wind.sources import owm as owmsrc
 from regatta_wind.sources import wrf as wrfsrc
 from regatta_wind.sources.openmeteo import fetch_fallback_field
@@ -34,27 +36,21 @@ def _load_wrf(path: str, mtime: float, tz: str, unit: str, domain: str, hours: i
 
 
 @st.cache_data(ttl=600, show_spinner=False)
-def _load_owm_current(lats: tuple[float, ...], lons: tuple[float, ...]) -> list[WindSample | None]:
-    out: list[WindSample | None] = []
-    for lat, lon in zip(lats, lons):
-        try:
-            out.append(owmsrc.fetch_current(lat, lon))
-        except Exception:  # noqa: BLE001
-            out.append(None)
-    return out
+def _load_owm_grid(bounds: tuple[float, float, float, float], n: int):
+    """Current OWM obs on a grid across the area (real wind, cached 10 min)."""
+    try:
+        return owmsrc.sample_grid(bounds, n)
+    except Exception:  # noqa: BLE001
+        return []
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
-def _load_owm_forecast(
-    lats: tuple[float, ...], lons: tuple[float, ...], hours: int
-) -> list[list[WindSample]]:
-    out: list[list[WindSample]] = []
-    for lat, lon in zip(lats, lons):
-        try:
-            out.append(owmsrc.fetch_forecast(lat, lon, hours))
-        except Exception:  # noqa: BLE001
-            out.append([])
-    return out
+@st.cache_data(ttl=600, show_spinner=False)
+def _load_om_grid(bounds: tuple[float, float, float, float], n: int, unit: str):
+    """Open-Meteo current wind on a grid (free second source, cached 10 min)."""
+    try:
+        return omsrc.sample_current_grid(bounds, n, unit=unit)
+    except Exception:  # noqa: BLE001
+        return []
 
 
 @st.cache_data(ttl=3600, show_spinner="Загрузка фолбэка Open-Meteo…")
@@ -78,7 +74,10 @@ def _resolve_field(cfg, source_choice: str, out_dir: str, domain: str):
         return fallback(), False, None
     wrf_path = wrfsrc.find_wrfout(out_dir, domain)
     if wrf_path:
-        field = _load_wrf(wrf_path, os.path.getmtime(wrf_path), cfg.timezone, unit, domain, hours)
+        # Keep ALL computed hours; the visible window is trimmed to now->end later
+        # via FineField.since(). (The WRF run already starts at the GFS cycle, which
+        # is in the past, so truncating from file start here would drop the future.)
+        field = _load_wrf(wrf_path, os.path.getmtime(wrf_path), cfg.timezone, unit, domain, 240)
         return field, True, wrf_path
     if source_choice == "WRF":
         return None, False, None
@@ -102,11 +101,14 @@ with st.sidebar:
     out_dir = st.text_input("Папка вывода WRF", value=cfg.wrf.output_dir)
     domain = compute.render(cfg.area.center_lat, cfg.area.center_lon)
 
-    st.subheader("OpenWeatherMap")
+    st.subheader("Реальные данные")
+    correct_obs = st.checkbox("Корректировать поле по факту", value=True,
+                              help="Сдвигать модель к реальным данным OWM + Open-Meteo на "
+                                   "ближних часах (затухает к концу прогноза).")
     if owmsrc.available():
-        st.success("OWM подключён · данные на ориентирах", icon="🌐")
+        st.caption("Источники факта: OpenWeatherMap + Open-Meteo (сетка по акватории).")
     else:
-        st.caption("Нет ключа OWM — реальные данные на точках отключены.")
+        st.caption("OWM-ключа нет — факт только по Open-Meteo.")
 
     st.subheader("Вид")
     hm_zmax = st.slider("Макс. шкала, узлы", 5, 50, 30, 5)
@@ -135,6 +137,26 @@ if field is None:
 # Drop hours already in the past — show now → end only.
 field = field.since(datetime.now(ZoneInfo(cfg.timezone)))
 
+corners = cfg.landmarks  # named LIMITS of the compute area, not OWM stations
+
+# Bounding box of the compute area (forecast is not needed beyond it).
+if corners:
+    bounds = (min(w.lat for w in corners), max(w.lat for w in corners),
+              min(w.lon for w in corners), max(w.lon for w in corners))
+else:
+    a = cfg.area
+    bounds = (a.center_lat - a.half_span_deg, a.center_lat + a.half_span_deg,
+              a.center_lon - a.half_span_deg, a.center_lon + a.half_span_deg)
+
+# Real wind sampled on a grid across the area: OWM (orange dots) + Open-Meteo
+# current (free second source). Both feed the bias correction; OWM is also drawn.
+owm_points = _load_owm_grid(bounds, 3) if owmsrc.available() else []
+om_points = _load_om_grid(bounds, 3, cfg.forecast.wind_speed_unit)
+obs_points = list(owm_points) + list(om_points)
+
+if correct_obs and obs_points:
+    field = correct.bias_correct(field, obs_points)
+
 c0, c1 = st.columns([3, 1])
 c0.caption(f"Источник: **{field.source}** · сетка ~{field.grid_km:g} км · "
            f"{'1 км' if domain == 'd03' else '3 км'} · TZ {cfg.timezone}")
@@ -143,24 +165,13 @@ if used_wrf and wrf_path:
 if not field.trusted:
     st.warning("⚠️ Грубый фолбэк Open-Meteo (~5 км), без рельефа/бриза — пока не посчитан WRF. "
                "Нажми «Просчитать прогноз» в боковой панели.")
-
-landmarks = cfg.landmarks
-
-# OWM point observations at the fixed landmarks (cached; key shipped by default).
-owm_current: list[WindSample | None] | None = None
-owm_forecast: list[list[WindSample]] | None = None
-if owmsrc.available() and landmarks:
-    lats = tuple(w.lat for w in landmarks)
-    lons = tuple(w.lon for w in landmarks)
-    span_h = ((field.times[-1] - field.times[0]).total_seconds() / 3600
-              if len(field.times) > 1 else cfg.forecast.hours_ahead)
-    owm_current = _load_owm_current(lats, lons)
-    owm_forecast = _load_owm_forecast(lats, lons, int(span_h) + 3)
+if correct_obs and obs_points:
+    st.caption(f"✔ Поле скорректировано по факту: {len(obs_points)} точек "
+               f"(OWM {len(owm_points)} + Open-Meteo {len(om_points)}), затухание к концу прогноза.")
 
 tab_map, tab_charts = st.tabs(["🗺 Карта ветра", "📈 Графики по точкам"])
 with tab_map:
-    wind_map.render(field, landmarks, vmax=hm_zmax, alpha=hm_alpha, arrows=arrows,
-                    owm_obs=owm_current)
+    wind_map.render(field, corners, vmax=hm_zmax, alpha=hm_alpha, arrows=arrows,
+                    owm_points=owm_points, bounds=bounds)
 with tab_charts:
-    charts.render(field, landmarks, cfg,
-                  owm_current=owm_current, owm_forecast=owm_forecast)
+    charts.render(field, corners, cfg)
