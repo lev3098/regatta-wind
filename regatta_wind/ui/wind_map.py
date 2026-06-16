@@ -16,13 +16,17 @@ import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
 
-from ..models import FineField, Waypoint
+from ..models import FineField, Waypoint, WindSample
 
 try:
-    from PIL import Image
+    from PIL import Image, ImageFilter
     _HAS_PIL = True
 except Exception:  # pragma: no cover
     _HAS_PIL = False
+
+# Render the field this big (px, long side) before blurring, so it stays smooth
+# at any map zoom instead of showing the WRF grid as flat-colour squares.
+_TARGET_PX = 1400
 
 # Windy-like speed colour ramp: calm blue → teal → green → yellow → orange → red.
 # (position 0..1, RGB). Used both for the raster and the Plotly colourbar.
@@ -37,6 +41,11 @@ _STOPS = [
     (1.00, (160, 40, 90)),
 ]
 _PLOTLY_SCALE = [(p, f"rgb({r},{g},{b})") for p, (r, g, b) in _STOPS]
+_COMPASS8 = ["С", "СВ", "В", "ЮВ", "Ю", "ЮЗ", "З", "СЗ"]
+
+
+def _compass_short(deg: float) -> str:
+    return _COMPASS8[round(deg / 45) % 8]
 
 
 def _ramp_channels() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -57,21 +66,29 @@ def _speed_to_rgba(speed: np.ndarray, vmax: float, alpha: float) -> np.ndarray:
 
 
 def _raster_overlay(field: FineField, speed: np.ndarray, vmax: float, alpha: float):
-    """Return (mapbox image-layer dict, bbox) or None if Pillow is unavailable."""
+    """Return (mapbox image-layer dict, bbox) or None if Pillow is unavailable.
+
+    The field is upscaled (bicubic) and given a sub-cell Gaussian blur so the WRF
+    grid melts into a continuous gradient instead of showing as flat-colour squares
+    (the "checkerboard" a 3 km field otherwise produces).
+    """
     if not _HAS_PIL:
         return None
     lat, lon = field.terrain.lat, field.terrain.lon
     lat_lo, lat_hi = float(np.min(lat)), float(np.max(lat))
     lon_lo, lon_hi = float(np.min(lon)), float(np.max(lon))
 
-    rgba = _speed_to_rgba(speed, vmax, alpha)
+    # Neutralise any NaN cells before colour-mapping so they don't bleed on resize.
+    ny, nx = speed.shape
+    fill = float(np.nanmean(speed)) if np.isfinite(speed).any() else 0.0
+    filled = np.where(np.isfinite(speed), speed, fill)
+
+    rgba = _speed_to_rgba(filled, vmax, alpha)
     # image row 0 must be the NORTH edge (lat_hi); WRF row 0 is south → flip
     img = Image.fromarray(np.flipud(rgba), mode="RGBA")
-    # upscale smoothly so the gradient looks continuous (Windy-like)
-    ny, nx = speed.shape
-    scale = max(1, int(700 / max(ny, nx)))
-    if scale > 1:
-        img = img.resize((nx * scale, ny * scale), Image.BICUBIC)
+    scale = max(8, math.ceil(_TARGET_PX / max(ny, nx)))
+    img = img.resize((nx * scale, ny * scale), Image.BICUBIC)
+    img = img.filter(ImageFilter.GaussianBlur(radius=max(1.0, scale * 0.7)))
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     uri = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
@@ -93,6 +110,7 @@ def build_figure(
     vmax: int = 30,
     alpha: float = 0.6,
     arrows: int = 28,
+    owm_obs: list[WindSample | None] | None = None,
 ) -> go.Figure:
     terrain = field.terrain
     lat2d, lon2d = terrain.lat, terrain.lon
@@ -170,19 +188,37 @@ def build_figure(
                           "<br>порыв %{customdata[2]:.1f} уз<extra></extra>",
             showlegend=False))
 
-    # marks + route
+    # fixed reference landmarks (named points the forecast must cover) — no route line
     if waypoints:
-        if len(waypoints) >= 2:
-            fig.add_trace(go.Scattermapbox(lat=[w.lat for w in waypoints],
-                lon=[w.lon for w in waypoints], mode="lines",
-                line=dict(color="rgba(255,255,255,0.9)", width=2),
-                hoverinfo="skip", showlegend=False))
         fig.add_trace(go.Scattermapbox(lat=[w.lat for w in waypoints],
             lon=[w.lon for w in waypoints], mode="markers+text",
-            marker=dict(size=12, color="white"),
-            text=[str(i + 1) for i in range(len(waypoints))],
-            textfont=dict(color="black", size=11),
-            hovertext=[w.name for w in waypoints], hoverinfo="text", showlegend=False))
+            marker=dict(size=8, color="rgba(255,255,255,0.95)"),
+            text=[w.name for w in waypoints], textposition="top center",
+            textfont=dict(color="rgba(255,255,255,0.92)", size=10),
+            hovertext=[w.name for w in waypoints], hoverinfo="text",
+            name="ориентиры", showlegend=False))
+
+    # OWM current obs at each waypoint
+    if waypoints and owm_obs:
+        owm_lats, owm_lons, owm_text, owm_hover = [], [], [], []
+        for w, obs in zip(waypoints, owm_obs):
+            if obs is None:
+                continue
+            compass_dir = _compass_short(obs.direction_deg)
+            owm_lats.append(w.lat)
+            owm_lons.append(w.lon)
+            owm_text.append(f"{obs.speed_kn:.0f}")
+            owm_hover.append(
+                f"{w.name}<br>OWM сейчас: {obs.speed_kn:.1f} kn · {obs.direction_deg:.0f}° {compass_dir}"
+                f"<br>порыв {obs.gust_kn:.1f} kn"
+            )
+        if owm_lats:
+            fig.add_trace(go.Scattermapbox(
+                lat=owm_lats, lon=owm_lons, mode="markers+text",
+                marker=dict(size=20, color="#FF9800", opacity=0.85),
+                text=owm_text, textfont=dict(color="white", size=10),
+                hovertext=owm_hover, hoverinfo="text",
+                name="OWM сейчас", showlegend=True))
 
     fig.update_layout(
         mapbox=dict(style="carto-darkmatter",
@@ -192,8 +228,15 @@ def build_figure(
     return fig
 
 
-def render(field: FineField, waypoints: list[Waypoint], *,
-           vmax: int, alpha: float, arrows: int) -> None:
+def render(
+    field: FineField,
+    waypoints: list[Waypoint],
+    *,
+    vmax: int,
+    alpha: float,
+    arrows: int,
+    owm_obs: list[WindSample | None] | None = None,
+) -> None:
     times = field.times
     if not times:
         st.warning("Поле пустое — нет кадров прогноза.")
@@ -207,5 +250,6 @@ def render(field: FineField, waypoints: list[Waypoint], *,
     dh = (sel - now).total_seconds() / 3600
     when = "сейчас" if abs(dh) < 0.5 else (f"{abs(dh):.0f} ч назад" if dh < 0 else f"через {dh:.0f} ч")
     st.caption(f"**{sel.strftime('%d %b %H:%M')}** · {when}")
-    fig = build_figure(field, idx, waypoints, vmax=vmax, alpha=alpha, arrows=arrows)
+    fig = build_figure(field, idx, waypoints, vmax=vmax, alpha=alpha, arrows=arrows,
+                       owm_obs=owm_obs)
     st.plotly_chart(fig, width="stretch", key="wind_field_map")

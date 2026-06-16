@@ -8,14 +8,21 @@ via ``wrf/.compute_status`` + ``wrf/.compute.log`` and auto-refreshed.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import signal
 import subprocess
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import streamlit as st
+
+_TZ = ZoneInfo("Asia/Vladivostok")
+_GFS_LAG_H = 6        # NOMADS publishes a cycle ~4-5 h after it; step back 6 h to be safe
+_GFS_STEP_H = 3       # GFS boundary interval (matches interval_seconds=10800)
+_MAX_HORIZON_H = 48   # cap the racing horizon (compute grows with it)
 
 _WRF_DIR = Path(__file__).resolve().parents[2] / "wrf"
 _STATUS = _WRF_DIR / ".compute_status"
@@ -102,11 +109,30 @@ def is_running() -> bool:
     return state == "RUNNING" and _pid_alive()
 
 
+def latest_gfs_cycle(now_utc: datetime) -> datetime:
+    """Newest GFS cycle (00/06/12/18 UTC) likely published by ``now``."""
+    base = now_utc - timedelta(hours=_GFS_LAG_H)
+    return base.replace(hour=(base.hour // 6) * 6, minute=0, second=0, microsecond=0)
+
+
+def run_hours_until(end_utc: datetime, now_utc: datetime) -> int:
+    """Integration hours from the latest GFS cycle to ``end`` (3-h aligned).
+
+    WRF must spin up from the cycle analysis, so this spans cycle→end even though
+    only now→end is shown. Floored at one 3-h step, capped for sanity.
+    """
+    cycle = latest_gfs_cycle(now_utc)
+    hours = (end_utc - cycle).total_seconds() / 3600.0
+    stepped = math.ceil(hours / _GFS_STEP_H) * _GFS_STEP_H
+    cap = math.ceil((_GFS_LAG_H + _MAX_HORIZON_H) / _GFS_STEP_H) * _GFS_STEP_H
+    return int(max(_GFS_STEP_H, min(stepped, cap)))
+
+
 def start_compute(center_lat: float, center_lon: float, run_hours: int, max_dom: int) -> None:
     env = dict(os.environ)
     env.update(
         CENTER_LAT=f"{center_lat:.4f}", CENTER_LON=f"{center_lon:.4f}",
-        RUN_HOURS=str(run_hours), MAX_DOM=str(max_dom),
+        RUN_HOURS=str(run_hours), FCST_HOURS=str(run_hours), MAX_DOM=str(max_dom),
     )
     logf = open(_LOG, "w")
     proc = subprocess.Popen(
@@ -120,10 +146,29 @@ def start_compute(center_lat: float, center_lon: float, run_hours: int, max_dom:
     _STATUS.write_text(f"RUNNING {datetime.now(timezone.utc).isoformat()} запуск")
 
 
-def render(center_lat: float, center_lon: float, run_hours: int, max_dom: int) -> None:
-    """Compute button + live status panel (sidebar)."""
+def render(center_lat: float, center_lon: float) -> str:
+    """Compute panel (sidebar): resolution + horizon + button + live progress.
+
+    Returns the display domain (``d02`` for 3 km, ``d03`` for 1 km) so the app
+    reads the matching wrfout.
+    """
     state, when, detail = _read_status()
     running = is_running()
+
+    # Resolution → which nest to compute and display.
+    res = st.radio("Точность", ["3 км — быстрее", "1 км — точнее, дольше"],
+                   index=0, help="1 км: convection-permitting, ловит бриз и тень мысов, "
+                                 "но считается заметно дольше.")
+    max_dom = 3 if res.startswith("1") else 2
+    domain = "d03" if max_dom == 3 else "d02"
+
+    # Horizon → end time. Forecast is shown from now to this point (not earlier).
+    horizon = st.slider("Прогноз вперёд, ч", _GFS_STEP_H, _MAX_HORIZON_H, 12, _GFS_STEP_H)
+    now_utc = datetime.now(timezone.utc)
+    end_loc = (now_utc + timedelta(hours=horizon)).astimezone(_TZ)
+    run_hours = run_hours_until(now_utc + timedelta(hours=horizon), now_utc)
+    st.caption(f"до **{end_loc:%d %b %H:%M}** (Влд) · WRF интегрирует {run_hours} ч "
+               f"от цикла GFS {latest_gfs_cycle(now_utc):%H}Z")
 
     if running:
         st.info(f"⏳ Считается… запущено {when[11:16]} UTC")
@@ -149,7 +194,7 @@ def render(center_lat: float, center_lon: float, run_hours: int, max_dom: int) -
             st.caption(f"этап: {_current_stage()[:70] or '…'}")
             st.caption(f"⏱ {_elapsed(when)} · обновлено {datetime.now().strftime('%H:%M:%S')}")
         _live()
-        return
+        return domain
 
     # not running — show last result + the launch button
     if state == "DONE":
@@ -157,9 +202,10 @@ def render(center_lat: float, center_lon: float, run_hours: int, max_dom: int) -
     elif state == "FAILED":
         st.error(f"❌ Не посчиталось: {detail or 'см. wrf/.compute.log'}")
 
-    label = "🧮 Просчитать прогноз здесь"
+    label = f"🧮 Просчитать {res.split(' — ')[0]} прогноз"
     if st.button(label, type="primary", width="stretch",
-                 help=f"Запустит WRF на центр области ({center_lat:.2f}, {center_lon:.2f}). "
-                      "Считается ~10–20 мин, можно закрыть вкладку — посчитается в фоне."):
+                 help=f"WRF на залив Петра Великого ({center_lat:.2f}, {center_lon:.2f}). "
+                      "Можно закрыть вкладку — посчитается в фоне."):
         start_compute(center_lat, center_lon, run_hours, max_dom)
         st.rerun()
+    return domain

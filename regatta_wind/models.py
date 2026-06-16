@@ -110,3 +110,21 @@ class FineField:
                 )
             )
         return out
+
+    def since(self, when: datetime) -> "FineField":
+        """New field keeping only frames at/after ``when`` (drops past hours).
+
+        Keeps the whole field if nothing remains (e.g. a stale forecast), so the
+        UI never ends up empty.
+        """
+        keep = [k for k, t in enumerate(self.times) if t >= when]
+        if not keep or len(keep) == len(self.times):
+            return self
+        return FineField(
+            terrain=self.terrain,
+            times=[self.times[k] for k in keep],
+            frames=[self.frames[k] for k in keep],
+            grid_km=self.grid_km,
+            source=self.source,
+            trusted=self.trusted,
+        )

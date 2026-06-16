@@ -22,11 +22,11 @@
  dx = 9000,                          ! d01 = 9 km → d02 3 km → d03 1 km
  dy = 9000,
  map_proj = 'lambert',
- ref_lat   =  43.08,                 ! centre on the bay
- ref_lon   = 131.88,
+ ref_lat   =  43.00,                 ! centre on the bay; 1 km nest covers all landmarks
+ ref_lon   = 131.75,
  truelat1  =  40.0,
  truelat2  =  46.0,
- stand_lon = 131.88,
+ stand_lon = 131.75,
  geog_data_path = '/wrf/WPS_GEOG',
 /
 

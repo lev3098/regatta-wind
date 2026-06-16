@@ -20,8 +20,21 @@ import yaml
 from .models import Waypoint
 
 # Peter the Great Bay (Vladivostok) — the tool's home water.
-DEFAULT_CENTER_LAT = 43.08
-DEFAULT_CENTER_LON = 131.88
+# Centre chosen so the validated 1 km WRF nest covers all the named landmarks
+# below (Amur Bay, Ussuri Bay, Slavyansky Bay, the islands) with margin.
+DEFAULT_CENTER_LAT = 43.00
+DEFAULT_CENTER_LON = 131.75
+
+# Fixed reference landmarks the forecast must cover. These are NOT editable race
+# marks — they orient the map and anchor the OWM observations / per-point charts.
+# Coordinates are approximate; correct any in route.yaml's `landmarks:` block.
+DEFAULT_LANDMARKS: list[Waypoint] = [
+    Waypoint("Мыс Песчаный", 43.34, 131.79),       # запад Амурского залива
+    Waypoint("Бухта Миноносок", 42.71, 131.36),    # Славянский залив
+    Waypoint("Остров Попова", 42.95, 131.73),      # архипелаг Императрицы Евгении
+    Waypoint("Остров Аскольд", 42.78, 132.34),     # вход в Уссурийский залив
+    Waypoint("Кирпичный завод", 43.23, 132.05),    # север Уссурийского зал. (≈)
+]
 
 
 @dataclass(frozen=True)
@@ -43,7 +56,7 @@ class WrfConfig:
 class AreaConfig:
     center_lat: float = DEFAULT_CENTER_LAT
     center_lon: float = DEFAULT_CENTER_LON
-    half_span_deg: float = 0.30       # ~33 km half-width; frames map + fallback grid
+    half_span_deg: float = 0.75       # covers the whole bay; frames map + fallback grid
 
     @property
     def bounds(self) -> tuple[float, float, float, float]:
@@ -60,7 +73,7 @@ class AreaConfig:
 class RaceConfig:
     name: str
     timezone: str
-    waypoints: list[Waypoint]
+    landmarks: list[Waypoint]
     forecast: ForecastConfig = field(default_factory=ForecastConfig)
     wrf: WrfConfig = field(default_factory=WrfConfig)
     area: AreaConfig = field(default_factory=AreaConfig)
@@ -85,59 +98,28 @@ def load_config(path: str) -> RaceConfig:
         domain=wr.get("domain", "d02"),
     )
 
-    waypoints = [
-        Waypoint(name=w["name"], lat=float(w["lat"]), lon=float(w["lon"]))
-        for w in data.get("waypoints", [])
-    ]
+    # Fixed reference landmarks (optional override of the built-in set).
+    raw_lm = data.get("landmarks")
+    if raw_lm:
+        landmarks = [
+            Waypoint(name=w["name"], lat=float(w["lat"]), lon=float(w["lon"]))
+            for w in raw_lm
+        ]
+    else:
+        landmarks = list(DEFAULT_LANDMARKS)
 
     ar = data.get("area", {})
-    if ar:
-        area = AreaConfig(
-            center_lat=float(ar.get("center_lat", DEFAULT_CENTER_LAT)),
-            center_lon=float(ar.get("center_lon", DEFAULT_CENTER_LON)),
-            half_span_deg=float(ar.get("half_span_deg", 0.30)),
-        )
-    elif waypoints:
-        # Centre the area on the mean of the marks when not given explicitly.
-        area = AreaConfig(
-            center_lat=sum(w.lat for w in waypoints) / len(waypoints),
-            center_lon=sum(w.lon for w in waypoints) / len(waypoints),
-        )
-    else:
-        area = AreaConfig()
+    area = AreaConfig(
+        center_lat=float(ar.get("center_lat", DEFAULT_CENTER_LAT)),
+        center_lon=float(ar.get("center_lon", DEFAULT_CENTER_LON)),
+        half_span_deg=float(ar.get("half_span_deg", AreaConfig().half_span_deg)),
+    )
 
     return RaceConfig(
         name=data.get("name", "Race"),
         timezone=data.get("timezone", "Asia/Vladivostok"),
-        waypoints=waypoints,
+        landmarks=landmarks,
         forecast=forecast,
         wrf=wrf,
         area=area,
     )
-
-
-def save_waypoints(path: str, waypoints: list[Waypoint], area: AreaConfig | None = None) -> None:
-    """Persist marks (and optionally the area) back to a route YAML.
-
-    Reads the existing file to preserve unrelated blocks, then rewrites the
-    ``waypoints`` (and ``area``) sections. Used by the interactive route editor
-    so the user never has to hand-edit coordinates.
-    """
-    try:
-        with open(path, encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
-    except FileNotFoundError:
-        data = {}
-
-    data["waypoints"] = [
-        {"name": w.name, "lat": round(w.lat, 5), "lon": round(w.lon, 5)} for w in waypoints
-    ]
-    if area is not None:
-        data["area"] = {
-            "center_lat": round(area.center_lat, 5),
-            "center_lon": round(area.center_lon, 5),
-            "half_span_deg": round(area.half_span_deg, 4),
-        }
-
-    with open(path, "w", encoding="utf-8") as f:
-        yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False)

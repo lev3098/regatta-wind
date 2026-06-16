@@ -80,10 +80,10 @@ def run(route_path: str, source: str) -> None:
     trust = "" if field.trusted else "  [yellow](грубый фолбэк — опирайся на WRF)[/]"
     console.print(f"[dim]{field.source} · сетка {field.grid_km:g} км · TZ {cfg.timezone}[/]{trust}\n")
 
-    if not cfg.waypoints:
-        console.print("[yellow]В маршруте нет знаков. Добавь их в YAML или в веб-интерфейсе.[/]")
+    if not cfg.landmarks:
+        console.print("[yellow]Нет контрольных точек. Задай блок `landmarks:` в YAML.[/]")
         return
-    for idx, w in enumerate(cfg.waypoints):
+    for idx, w in enumerate(cfg.landmarks):
         console.print(_build_table(field, w, idx, cfg))
         console.print()
 

@@ -1,4 +1,8 @@
-"""Per-mark hourly charts: speed (+gusts), direction with shifts, tactical window."""
+"""Per-mark hourly charts: speed (+gusts), direction with shifts, tactical window.
+
+Optionally overlays OpenWeatherMap observations (current + 3-h forecast) when an
+API key is present, giving a real-time sanity-check next to the model field.
+"""
 
 from __future__ import annotations
 
@@ -11,12 +15,19 @@ from plotly.subplots import make_subplots
 
 from .. import tactics
 from ..config import RaceConfig
-from ..models import FineField, Waypoint
+from ..models import FineField, Waypoint, WindSample
 
 _COMPASS8 = ["С", "СВ", "В", "ЮВ", "Ю", "ЮЗ", "З", "СЗ"]
 
 
-def _render_one(field: FineField, w: Waypoint, cfg: RaceConfig) -> None:
+def _render_one(
+    field: FineField,
+    w: Waypoint,
+    cfg: RaceConfig,
+    *,
+    owm_current: WindSample | None = None,
+    owm_forecast: list[WindSample] | None = None,
+) -> None:
     samples = field.sample_series(w.lat, w.lon)
     if not samples:
         st.warning("Нет данных по этому знаку.")
@@ -70,6 +81,44 @@ def _render_one(field: FineField, w: Waypoint, cfg: RaceConfig) -> None:
         fig.add_trace(go.Scatter(x=sx, y=sy, mode="text", text=stxt,
             textfont=dict(size=18, color="yellow"), name="Заход", hoverinfo="skip"), row=2, col=1)
 
+    # OWM 3-h forecast overlay
+    if owm_forecast:
+        tz = samples[0].time.tzinfo
+        owm_times = [s.time.astimezone(tz) for s in owm_forecast]
+        owm_speeds = [s.speed_kn for s in owm_forecast]
+        owm_dirs = [s.direction_deg for s in owm_forecast]
+        owm_gusts = [s.gust_kn for s in owm_forecast]
+        fig.add_trace(go.Scatter(x=owm_times, y=owm_speeds, name="OWM прогноз",
+            mode="lines+markers", line=dict(color="#FF9800", width=1.5, dash="dot"),
+            marker=dict(size=7, color="#FF9800"),
+            hovertemplate="%{x|%H:%M}  %{y:.1f} kn<extra>OWM</extra>"), row=1, col=1)
+        fig.add_trace(go.Scatter(x=owm_times, y=owm_gusts, name="OWM порывы",
+            mode="markers", marker=dict(size=5, color="#FF9800", symbol="triangle-up"),
+            hovertemplate="%{x|%H:%M}  %{y:.1f} kn<extra>OWM порыв</extra>"), row=1, col=1)
+        fig.add_trace(go.Scatter(x=owm_times, y=owm_dirs, name="OWM направление",
+            mode="lines+markers", line=dict(color="#FF9800", width=1.5, dash="dot"),
+            marker=dict(size=7, color="#FF9800"),
+            hovertemplate="%{x|%H:%M}  %{customdata:.0f}°<extra>OWM направление</extra>",
+            customdata=owm_dirs), row=2, col=1)
+
+    # OWM current obs — single dot at observation time
+    if owm_current:
+        tz = samples[0].time.tzinfo
+        obs_t = owm_current.time.astimezone(tz)
+        spd_lbl = f"{obs_t.strftime('%H:%M')}  {owm_current.speed_kn:.1f} kn"
+        dir_lbl = f"{obs_t.strftime('%H:%M')}  {owm_current.direction_deg:.0f}°"
+        fig.add_trace(go.Scatter(x=[obs_t], y=[owm_current.speed_kn], name="OWM сейчас",
+            mode="markers", marker=dict(size=14, color="#FF9800", symbol="star",
+                                        line=dict(color="white", width=1)),
+            hovertemplate=spd_lbl + "<extra>OWM</extra>"),
+            row=1, col=1)
+        fig.add_trace(go.Scatter(x=[obs_t], y=[owm_current.direction_deg],
+            name="OWM сейчас (напр)", mode="markers",
+            marker=dict(size=14, color="#FF9800", symbol="star",
+                        line=dict(color="white", width=1)),
+            hovertemplate=dir_lbl + "<extra>OWM</extra>"),
+            row=2, col=1)
+
     fig.add_vline(x=now.isoformat(), line=dict(color="rgba(255,255,255,0.5)", width=1.5, dash="dash"))
     fig.add_vrect(x0=win_start.isoformat(), x1=win_end.isoformat(),
         fillcolor="rgba(255,220,0,0.07)", line=dict(color="rgba(255,220,0,0.35)", width=1),
@@ -95,12 +144,30 @@ def _render_one(field: FineField, w: Waypoint, cfg: RaceConfig) -> None:
         c2.metric("Амплитуда", f"{amp:.0f}°")
         c3.metric("Характер", "осциллирующий" if amp > 30 else "устойчивый")
 
+    if owm_current:
+        tz = samples[0].time.tzinfo
+        obs_t = owm_current.time.astimezone(tz)
+        st.caption(f"**OWM сейчас** ({obs_t.strftime('%H:%M')}) "
+                   f"· {owm_current.speed_kn:.1f} kn "
+                   f"· порыв {owm_current.gust_kn:.1f} kn "
+                   f"· {owm_current.direction_deg:.0f}° "
+                   f"({tactics.compass(owm_current.direction_deg)})")
 
-def render(field: FineField, waypoints: list[Waypoint], cfg: RaceConfig) -> None:
+
+def render(
+    field: FineField,
+    waypoints: list[Waypoint],
+    cfg: RaceConfig,
+    *,
+    owm_current: list[WindSample | None] | None = None,
+    owm_forecast: list[list[WindSample]] | None = None,
+) -> None:
     if not waypoints:
         st.info("Поставь знаки на вкладке «Маршрут», чтобы увидеть графики по точкам.")
         return
     tabs = st.tabs([f"{i + 1}. {w.name}" for i, w in enumerate(waypoints)])
-    for tab, w in zip(tabs, waypoints):
+    for idx, (tab, w) in enumerate(zip(tabs, waypoints)):
         with tab:
-            _render_one(field, w, cfg)
+            cur = owm_current[idx] if owm_current and idx < len(owm_current) else None
+            fcast = owm_forecast[idx] if owm_forecast and idx < len(owm_forecast) else None
+            _render_one(field, w, cfg, owm_current=cur, owm_forecast=fcast)

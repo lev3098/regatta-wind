@@ -9,7 +9,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GFS_DIR="${HERE}/gfs"
-FCST_HOURS=12
+FCST_HOURS="${FCST_HOURS:-12}"   # how many forecast hours of boundaries to fetch
 STEP=3                       # boundary interval (h) — matches interval_seconds=10800
 
 # Region around Peter the Great Bay (with margin for the 9 km parent domain).
