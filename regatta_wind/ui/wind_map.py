@@ -97,7 +97,6 @@ def _raster_overlay(field: FineField, speed: np.ndarray, vmax: float, alpha: flo
         sourcetype="image",
         source=uri,
         coordinates=[[lon_lo, lat_hi], [lon_hi, lat_hi], [lon_hi, lat_lo], [lon_lo, lat_lo]],
-        below="traces",
     )
     return layer, (lat_lo, lat_hi, lon_lo, lon_hi)
 
@@ -127,13 +126,13 @@ def build_figure(
         layers.append(layer)
     else:
         # fallback: dense density heatmap
-        fig.add_trace(go.Densitymapbox(
+        fig.add_trace(go.Densitymap(
             lat=lat2d.ravel(), lon=lon2d.ravel(), z=np.nan_to_num(speed.ravel()),
             radius=25, opacity=alpha, colorscale=_PLOTLY_SCALE, zmin=0, zmax=vmax,
             showscale=False, hoverinfo="skip"))
 
     # colourbar (dummy trace carrying the scale)
-    fig.add_trace(go.Scattermapbox(
+    fig.add_trace(go.Scattermap(
         lat=[float(np.mean(lat2d))], lon=[float(np.mean(lon2d))], mode="markers",
         marker=dict(size=0.1, color=[0], colorscale=_PLOTLY_SCALE, cmin=0, cmax=vmax,
                     showscale=True,
@@ -167,7 +166,7 @@ def build_figure(
                     blat += [hlat, hlat + math.cos(a) * length * 0.4, None]
                     blon += [hlon, hlon + math.sin(a) * length * 0.4 / cosl, None]
         if blat:
-            fig.add_trace(go.Scattermapbox(lat=blat, lon=blon, mode="lines",
+            fig.add_trace(go.Scattermap(lat=blat, lon=blon, mode="lines",
                 line=dict(color="rgba(255,255,255,0.7)", width=1.3),
                 hoverinfo="skip", showlegend=False))
 
@@ -183,7 +182,7 @@ def build_figure(
             cd.append([s, float(direction[i, j]),
                        float(gust[i, j]) if np.isfinite(gust[i, j]) else float("nan")])
     if hl:
-        fig.add_trace(go.Scattermapbox(lat=hl, lon=hn, mode="markers",
+        fig.add_trace(go.Scattermap(lat=hl, lon=hn, mode="markers",
             marker=dict(size=14, color="rgba(0,0,0,0)"), customdata=cd,
             hovertemplate="%{customdata[0]:.1f} уз · %{customdata[1]:.0f}°"
                           "<br>порыв %{customdata[2]:.1f} уз<extra></extra>",
@@ -192,14 +191,14 @@ def build_figure(
     # compute-boundary rectangle (forecast is not needed beyond it)
     if bounds is not None:
         lo_a, hi_a, lo_o, hi_o = bounds
-        fig.add_trace(go.Scattermapbox(
+        fig.add_trace(go.Scattermap(
             lat=[lo_a, lo_a, hi_a, hi_a, lo_a], lon=[lo_o, hi_o, hi_o, lo_o, lo_o],
             mode="lines", line=dict(color="rgba(255,255,255,0.55)", width=1.5),
             hoverinfo="skip", showlegend=False))
 
     # corner reference points (the named limits of the compute area) — small ticks
     if corners:
-        fig.add_trace(go.Scattermapbox(lat=[w.lat for w in corners],
+        fig.add_trace(go.Scattermap(lat=[w.lat for w in corners],
             lon=[w.lon for w in corners], mode="markers+text",
             marker=dict(size=7, color="rgba(255,255,255,0.9)"),
             text=[w.name for w in corners], textposition="top center",
@@ -215,17 +214,17 @@ def build_figure(
             o_hov.append(f"OWM: {obs.speed_kn:.1f} kn · {obs.direction_deg:.0f}° "
                          f"{_compass_short(obs.direction_deg)}<br>порыв {obs.gust_kn:.1f} kn")
         if o_lat:
-            fig.add_trace(go.Scattermapbox(
+            fig.add_trace(go.Scattermap(
                 lat=o_lat, lon=o_lon, mode="markers+text",
                 marker=dict(size=18, color="#FF9800", opacity=0.85),
                 text=o_txt, textfont=dict(color="white", size=9),
                 hovertext=o_hov, hoverinfo="text", name="OWM", showlegend=True))
 
     fig.update_layout(
-        mapbox=dict(style="carto-darkmatter",
-                    center=dict(lat=float(np.mean(lat2d)), lon=float(np.mean(lon2d))),
-                    zoom=9.2, layers=layers,
-                    uirevision="windmap"),  # keep user's pan/zoom across reruns
+        map=dict(style="carto-darkmatter",
+                 center=dict(lat=float(np.mean(lat2d)), lon=float(np.mean(lon2d))),
+                 zoom=9.2, layers=layers,
+                 uirevision="windmap"),  # MapLibre keeps user's pan/zoom across reruns
         margin=dict(t=0, b=0, l=0, r=0), height=640, uirevision="windmap")
     return fig
 
