@@ -110,15 +110,11 @@ with st.sidebar:
     else:
         st.caption("OWM-ключа нет — факт только по Open-Meteo.")
 
-    st.subheader("Вид")
-    hm_zmax = st.slider("Макс. шкала, узлы", 5, 50, 30, 5)
-    hm_alpha = st.slider("Непрозрачность поля", 0.2, 0.9, 0.6, 0.05)
-    arrows = st.slider("Плотность стрелок (0 = без)", 0, 50, 28, 2,
-                       help="Сколько стрелок по стороне сетки")
-    if st.button("↻ Обновить", width="stretch"):
+    st.caption("Вид (шкала, прозрачность, стрелки, час) — над картой. Прогноз WRF "
+               "считается локально, см. wrf/README.md.")
+    if st.button("↻ Сбросить кэш данных", width="stretch"):
         st.cache_data.clear()
         st.rerun()
-    st.caption("Прогноз WRF считается локально — см. wrf/README.md")
 
 
 # ── load + header ───────────────────────────────────────────────────────────
@@ -171,7 +167,6 @@ if correct_obs and obs_points:
 
 tab_map, tab_charts = st.tabs(["🗺 Карта ветра", "📈 Графики по точкам"])
 with tab_map:
-    wind_map.render(field, corners, vmax=hm_zmax, alpha=hm_alpha, arrows=arrows,
-                    owm_points=owm_points, bounds=bounds)
+    wind_map.render(field, corners, owm_points=owm_points, bounds=bounds)
 with tab_charts:
     charts.render(field, corners, cfg)

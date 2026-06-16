@@ -224,7 +224,8 @@ def build_figure(
     fig.update_layout(
         mapbox=dict(style="carto-darkmatter",
                     center=dict(lat=float(np.mean(lat2d)), lon=float(np.mean(lon2d))),
-                    zoom=9.2, layers=layers),
+                    zoom=9.2, layers=layers,
+                    uirevision="windmap"),  # keep user's pan/zoom across reruns
         margin=dict(t=0, b=0, l=0, r=0), height=640, uirevision="windmap")
     return fig
 
@@ -233,28 +234,43 @@ def render(
     field: FineField,
     corners: list[Waypoint],
     *,
-    vmax: int,
-    alpha: float,
-    arrows: int,
     owm_points: list[tuple[float, float, WindSample]] | None = None,
     bounds: tuple[float, float, float, float] | None = None,
 ) -> None:
-    times = field.times
-    if not times:
-        st.warning("Поле пустое — нет кадров прогноза.")
-        return
-    tz = times[0].tzinfo
-    now = datetime.now(tz)
-    default_idx = min(range(len(times)), key=lambda i: abs((times[i] - now).total_seconds()))
-    if len(times) == 1:
-        idx = 0  # a single forecast hour: no slider (avoids a min==max range error)
-    else:
-        idx = st.select_slider("⏱ Час прогноза", options=list(range(len(times))),
-            value=default_idx, format_func=lambda i: times[i].strftime("%d %b %H:%M"))
-    sel = times[idx]
-    dh = (sel - now).total_seconds() / 3600
-    when = "сейчас" if abs(dh) < 0.5 else (f"{abs(dh):.0f} ч назад" if dh < 0 else f"через {dh:.0f} ч")
-    st.caption(f"**{sel.strftime('%d %b %H:%M')}** · {when}")
-    fig = build_figure(field, idx, corners, vmax=vmax, alpha=alpha, arrows=arrows,
-                       owm_points=owm_points, bounds=bounds)
-    st.plotly_chart(fig, width="stretch", key="wind_field_map")
+    """Map tab: view controls + hour slider + chart, all in one fragment.
+
+    Keeping the controls inside the fragment means changing them reruns only this
+    block — the chart element persists and ``uirevision`` holds the user's pan/zoom
+    instead of snapping back to the default centre.
+    """
+
+    @st.fragment
+    def _panel() -> None:
+        c1, c2, c3 = st.columns(3)
+        vmax = c1.slider("Макс. шкала, узлы", 5, 50, 30, 5, key="wm_vmax")
+        alpha = c2.slider("Непрозрачность", 0.2, 0.9, 0.6, 0.05, key="wm_alpha")
+        arrows = c3.slider("Плотность стрелок", 0, 50, 28, 2, key="wm_arrows",
+                           help="Сколько стрелок по стороне сетки (0 = без)")
+
+        times = field.times
+        if not times:
+            st.warning("Поле пустое — нет кадров прогноза.")
+            return
+        tz = times[0].tzinfo
+        now = datetime.now(tz)
+        default_idx = min(range(len(times)), key=lambda i: abs((times[i] - now).total_seconds()))
+        if len(times) == 1:
+            idx = 0  # single forecast hour: no slider (avoids a min==max range error)
+        else:
+            idx = st.select_slider("⏱ Час прогноза", options=list(range(len(times))),
+                value=default_idx, format_func=lambda i: times[i].strftime("%d %b %H:%M"))
+        sel = times[idx]
+        dh = (sel - now).total_seconds() / 3600
+        when = ("сейчас" if abs(dh) < 0.5
+                else (f"{abs(dh):.0f} ч назад" if dh < 0 else f"через {dh:.0f} ч"))
+        st.caption(f"**{sel.strftime('%d %b %H:%M')}** · {when}")
+        fig = build_figure(field, idx, corners, vmax=vmax, alpha=alpha, arrows=arrows,
+                           owm_points=owm_points, bounds=bounds)
+        st.plotly_chart(fig, width="stretch", key="wind_field_map")
+
+    _panel()
