@@ -1,25 +1,25 @@
-"""Windy-style wind field on a folium map.
+"""Windy-style wind field on a Plotly map (MapLibre engine).
 
-The forecast area is drawn as a smooth colour-gradient image overlay (built with
-Pillow), with direction arrows, the compute-boundary box, corner labels, a colour
-legend and live OpenWeatherMap dots.
+The forecast area is a smooth colour-gradient image overlay (built with Pillow),
+with direction arrows, the compute-boundary box, corner labels, a colour legend
+and live OpenWeatherMap dots.
 
-The map view (pan/zoom) is preserved across reruns by echoing folium's own
-center/zoom back into ``st_folium`` and feeding them in again — this is
-deterministic and does not rely on Plotly's uirevision (which Streamlit does not
-honour for the map camera).
+Keeping the user's pan/zoom across reruns relies on Plotly's ``uirevision`` — which
+Streamlit only honours when it can do an in-place ``Plotly.react``. It falls back
+to ``newPlot`` (resetting the camera) when the figure's TRACE COUNT changes between
+reruns, so we always emit the SAME set of traces (empty when there's no data).
 """
 
 from __future__ import annotations
 
+import base64
+import io
 import math
 from datetime import datetime
 
-import folium
 import numpy as np
+import plotly.graph_objects as go
 import streamlit as st
-from branca.colormap import LinearColormap
-from streamlit_folium import st_folium
 
 from ..models import FineField, Waypoint, WindSample
 
@@ -30,9 +30,8 @@ except Exception:  # pragma: no cover
     _HAS_PIL = False
 
 # Render the field this big (px, long side) before blurring, so it stays smooth
-# at any map zoom instead of showing the WRF grid as flat-colour squares. Kept
-# modest because the PNG is embedded in the folium HTML on every interaction.
-_TARGET_PX = 800
+# at any zoom instead of showing the WRF grid as flat-colour squares.
+_TARGET_PX = 1400
 
 # Windy-like speed colour ramp: calm blue → teal → green → yellow → orange → red.
 _STOPS = [
@@ -45,6 +44,7 @@ _STOPS = [
     (0.90, (224, 80, 60)),
     (1.00, (160, 40, 90)),
 ]
+_PLOTLY_SCALE = [(p, f"rgb({r},{g},{b})") for p, (r, g, b) in _STOPS]
 _COMPASS8 = ["С", "СВ", "В", "ЮВ", "Ю", "ЮЗ", "З", "СЗ"]
 
 
@@ -69,31 +69,48 @@ def _speed_to_rgba(speed: np.ndarray, vmax: float, alpha: float) -> np.ndarray:
     return np.dstack([r.astype(np.uint8), g.astype(np.uint8), b.astype(np.uint8), a])
 
 
-def _field_rgba(speed: np.ndarray, vmax: float, alpha: float) -> np.ndarray | None:
-    """North-up RGBA image of the field, upscaled + blurred so it reads as a
-    continuous gradient (not flat-colour WRF squares)."""
+def _raster_overlay(field: FineField, speed: np.ndarray, vmax: float, alpha: float):
+    """Return a MapLibre image-layer dict, or None if Pillow is unavailable.
+
+    Upscaled (bicubic) + sub-cell Gaussian blur so the WRF grid melts into a
+    continuous gradient instead of flat-colour squares.
+    """
     if not _HAS_PIL:
         return None
+    lat, lon = field.terrain.lat, field.terrain.lon
+    lat_lo, lat_hi = float(np.min(lat)), float(np.max(lat))
+    lon_lo, lon_hi = float(np.min(lon)), float(np.max(lon))
+
     ny, nx = speed.shape
     fill = float(np.nanmean(speed)) if np.isfinite(speed).any() else 0.0
     filled = np.where(np.isfinite(speed), speed, fill)
+
     rgba = _speed_to_rgba(filled, vmax, alpha)
     img = Image.fromarray(np.flipud(rgba), mode="RGBA")  # row 0 must be NORTH
     scale = max(8, math.ceil(_TARGET_PX / max(ny, nx)))
     img = img.resize((nx * scale, ny * scale), Image.BICUBIC)
     img = img.filter(ImageFilter.GaussianBlur(radius=max(1.0, scale * 0.7)))
-    return np.asarray(img)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    uri = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+    return dict(
+        sourcetype="image", source=uri,
+        coordinates=[[lon_lo, lat_hi], [lon_hi, lat_hi], [lon_hi, lat_lo], [lon_lo, lat_lo]],
+    )
 
 
-def _arrow_segments(field: FineField, frame, vmax: float, arrows: int) -> list:
-    """MultiLineString coordinates for thinned direction arrows."""
+def _arrow_lines(field: FineField, frame, vmax: float, arrows: int):
+    """(lats, lons) with None separators for thinned direction arrows."""
     lat2d, lon2d = field.terrain.lat, field.terrain.lon
     ny, nx = lat2d.shape
     speed, direction = frame.speed_kn, frame.dir_deg
+    blat: list = []
+    blon: list = []
+    if arrows <= 0:
+        return blat, blon
     step = max(1, math.ceil(max(ny, nx) / arrows))
     dlat = float(np.median(np.abs(np.diff(lat2d, axis=0)))) if ny > 1 else 0.01
     alen = step * dlat * 0.9 / max(vmax, 1)
-    segs: list = []
     for i in range(0, ny, step):
         for j in range(0, nx, step):
             spd = float(speed[i, j])
@@ -105,93 +122,113 @@ def _arrow_segments(field: FineField, frame, vmax: float, arrows: int) -> list:
             bearing = math.radians((float(direction[i, j]) + 180) % 360)
             hlat = lat + math.cos(bearing) * length
             hlon = lon + math.sin(bearing) * length / cosl
-            segs.append([[lon, lat], [hlon, hlat]])
+            blat += [lat, hlat, None]
+            blon += [lon, hlon, None]
             back = math.radians(float(direction[i, j]) % 360)
             for side in (-30, 30):
                 a = back + math.radians(side)
-                segs.append([[hlon, hlat],
-                             [hlon + math.sin(a) * length * 0.4 / cosl,
-                              hlat + math.cos(a) * length * 0.4]])
-    return segs
+                blat += [hlat, hlat + math.cos(a) * length * 0.4, None]
+                blon += [hlon, hlon + math.sin(a) * length * 0.4 / cosl, None]
+    return blat, blon
 
 
-def _build_map(
+def build_figure(
     field: FineField,
     idx: int,
     corners: list[Waypoint],
     *,
-    vmax: int,
-    alpha: float,
-    arrows: int,
-    rgba: np.ndarray | None,
-    owm_points: list[tuple[float, float, WindSample]] | None,
-    bounds: tuple[float, float, float, float] | None,
-    center: list[float],
-    zoom: float,
-) -> folium.Map:
+    vmax: int = 30,
+    alpha: float = 0.6,
+    arrows: int = 28,
+    owm_points: list[tuple[float, float, WindSample]] | None = None,
+    bounds: tuple[float, float, float, float] | None = None,
+) -> go.Figure:
     lat2d, lon2d = field.terrain.lat, field.terrain.lon
-    lat_lo, lat_hi = float(np.min(lat2d)), float(np.max(lat2d))
-    lon_lo, lon_hi = float(np.min(lon2d)), float(np.max(lon2d))
+    ny, nx = lat2d.shape
     frame = field.frames[idx]
+    speed, direction, gust = frame.speed_kn, frame.dir_deg, frame.gust_kn
+    clat, clon = float(np.mean(lat2d)), float(np.mean(lon2d))
 
-    m = folium.Map(location=center, zoom_start=zoom, tiles="CartoDB dark_matter",
-                   control_scale=True, zoom_control=True)
+    fig = go.Figure()
+    overlay = _raster_overlay(field, speed, vmax, alpha)
+    layers = [overlay] if overlay is not None else []
+    if overlay is None:  # PIL missing → density fallback (kept first, stable)
+        fig.add_trace(go.Densitymap(
+            lat=lat2d.ravel(), lon=lon2d.ravel(), z=np.nan_to_num(speed.ravel()),
+            radius=25, opacity=alpha, colorscale=_PLOTLY_SCALE, zmin=0, zmax=vmax,
+            showscale=False, hoverinfo="skip"))
 
-    # smooth gradient field (image precomputed/memoised by the caller)
-    if rgba is not None:
-        folium.raster_layers.ImageOverlay(
-            image=rgba, bounds=[[lat_lo, lon_lo], [lat_hi, lon_hi]],
-            opacity=1.0, origin="upper", zindex=1).add_to(m)
+    # ── A STABLE SET OF TRACES (always the same count/order) so Streamlit does an
+    #    in-place react and uirevision keeps the camera. Empty arrays when no data.
 
-    # direction arrows (one efficient MultiLineString layer)
-    if arrows > 0:
-        segs = _arrow_segments(field, frame, vmax, arrows)
-        if segs:
-            folium.GeoJson(
-                {"type": "Feature", "geometry": {"type": "MultiLineString", "coordinates": segs}},
-                style_function=lambda _f: {"color": "#ffffff", "weight": 1.2, "opacity": 0.75},
-            ).add_to(m)
+    # 1) colour legend (dummy point carrying the colorbar)
+    fig.add_trace(go.Scattermap(
+        lat=[clat], lon=[clon], mode="markers",
+        marker=dict(size=0.1, color=[0], colorscale=_PLOTLY_SCALE, cmin=0, cmax=vmax,
+                    showscale=True,
+                    colorbar=dict(title=dict(text="узлы", font=dict(color="white")),
+                                  thickness=14, len=0.6, x=1.0, tickfont=dict(color="white"))),
+        hoverinfo="skip", showlegend=False))
 
-    # compute-boundary box (forecast is not needed beyond it)
+    # 2) direction arrows
+    blat, blon = _arrow_lines(field, frame, vmax, arrows)
+    fig.add_trace(go.Scattermap(lat=blat, lon=blon, mode="lines",
+        line=dict(color="rgba(255,255,255,0.7)", width=1.3),
+        hoverinfo="skip", showlegend=False))
+
+    # 3) hover cells (values on tap)
+    hstep = max(1, math.ceil(max(ny, nx) / 40))
+    hl, hn, cd = [], [], []
+    for i in range(0, ny, hstep):
+        for j in range(0, nx, hstep):
+            s = float(speed[i, j])
+            if not np.isfinite(s):
+                continue
+            hl.append(float(lat2d[i, j])); hn.append(float(lon2d[i, j]))
+            cd.append([s, float(direction[i, j]),
+                       float(gust[i, j]) if np.isfinite(gust[i, j]) else float("nan")])
+    fig.add_trace(go.Scattermap(lat=hl, lon=hn, mode="markers",
+        marker=dict(size=14, color="rgba(0,0,0,0)"), customdata=cd,
+        hovertemplate="%{customdata[0]:.1f} уз · %{customdata[1]:.0f}°"
+                      "<br>порыв %{customdata[2]:.1f} уз<extra></extra>",
+        showlegend=False))
+
+    # 4) compute-boundary box
     if bounds is not None:
         lo_a, hi_a, lo_o, hi_o = bounds
-        folium.Rectangle([[lo_a, lo_o], [hi_a, hi_o]], color="#ffffff", weight=1.5,
-                         opacity=0.55, fill=False).add_to(m)
+        brlat = [lo_a, lo_a, hi_a, hi_a, lo_a]
+        brlon = [lo_o, hi_o, hi_o, lo_o, lo_o]
+    else:
+        brlat, brlon = [], []
+    fig.add_trace(go.Scattermap(lat=brlat, lon=brlon, mode="lines",
+        line=dict(color="rgba(255,255,255,0.55)", width=1.5),
+        hoverinfo="skip", showlegend=False))
 
-    # corner reference points (named limits of the compute area)
-    for w in corners or []:
-        folium.CircleMarker([w.lat, w.lon], radius=4, color="#ffffff", weight=1,
-                            fill=True, fill_color="#ffffff", fill_opacity=0.9,
-                            tooltip=w.name).add_to(m)
-        folium.map.Marker(
-            [w.lat, w.lon],
-            icon=folium.DivIcon(
-                icon_size=(120, 16), icon_anchor=(-6, 8),
-                html=f'<div style="font:600 10px sans-serif;color:#fff;'
-                     f'text-shadow:0 0 3px #000">{w.name}</div>'),
-        ).add_to(m)
+    # 5) corner reference points (named limits of the compute area)
+    cps = corners or []
+    fig.add_trace(go.Scattermap(
+        lat=[w.lat for w in cps], lon=[w.lon for w in cps], mode="markers+text",
+        marker=dict(size=7, color="rgba(255,255,255,0.9)"),
+        text=[w.name for w in cps], textposition="top center",
+        textfont=dict(color="rgba(255,255,255,0.85)", size=9),
+        hovertext=[w.name for w in cps], hoverinfo="text", showlegend=False))
 
-    # OpenWeatherMap real-wind dots (sampled across the area)
-    for plat, plon, obs in owm_points or []:
-        folium.CircleMarker(
-            [plat, plon], radius=9, color="#FF9800", weight=1,
-            fill=True, fill_color="#FF9800", fill_opacity=0.85,
-            tooltip=f"OWM: {obs.speed_kn:.1f} уз · {obs.direction_deg:.0f}° "
-                    f"{_compass_short(obs.direction_deg)} · порыв {obs.gust_kn:.1f}").add_to(m)
-        folium.map.Marker(
-            [plat, plon],
-            icon=folium.DivIcon(
-                icon_size=(24, 14), icon_anchor=(12, 7),
-                html=f'<div style="font:700 9px sans-serif;color:#fff;text-align:center">'
-                     f'{obs.speed_kn:.0f}</div>'),
-        ).add_to(m)
+    # 6) OpenWeatherMap real-wind dots (sampled across the area)
+    pts = owm_points or []
+    fig.add_trace(go.Scattermap(
+        lat=[p[0] for p in pts], lon=[p[1] for p in pts], mode="markers+text",
+        marker=dict(size=18, color="#FF9800", opacity=0.85),
+        text=[f"{p[2].speed_kn:.0f}" for p in pts], textfont=dict(color="white", size=9),
+        hovertext=[f"OWM: {p[2].speed_kn:.1f} уз · {p[2].direction_deg:.0f}° "
+                   f"{_compass_short(p[2].direction_deg)}<br>порыв {p[2].gust_kn:.1f} уз"
+                   for p in pts],
+        hoverinfo="text", name="OWM", showlegend=False))
 
-    # colour legend (knots)
-    colours = ["#%02x%02x%02x" % rgb for _p, rgb in _STOPS]
-    cmap = LinearColormap(colours, index=[p * vmax for p, _ in _STOPS],
-                          vmin=0, vmax=vmax, caption="узлы")
-    cmap.add_to(m)
-    return m
+    fig.update_layout(
+        map=dict(style="carto-darkmatter", center=dict(lat=clat, lon=clon),
+                 zoom=9.2, layers=layers, uirevision="windmap"),
+        margin=dict(t=0, b=0, l=0, r=0), height=640, uirevision="windmap")
+    return fig
 
 
 def render(
@@ -201,15 +238,7 @@ def render(
     owm_points: list[tuple[float, float, WindSample]] | None = None,
     bounds: tuple[float, float, float, float] | None = None,
 ) -> None:
-    """Map tab: view controls + hour slider + folium map, in one fragment.
-
-    The view (pan/zoom) is kept by echoing folium's center/zoom through
-    session_state, so changing any control does not recentre the map.
-    """
-    clat = float(np.mean(field.terrain.lat))
-    clon = float(np.mean(field.terrain.lon))
-    st.session_state.setdefault("wm_center", [clat, clon])
-    st.session_state.setdefault("wm_zoom", 10)
+    """Map tab: view controls + hour slider + chart, in one fragment."""
 
     @st.fragment
     def _panel() -> None:
@@ -237,27 +266,8 @@ def render(
                 else (f"{abs(dh):.0f} ч назад" if dh < 0 else f"через {dh:.0f} ч"))
         st.caption(f"**{sel.strftime('%d %b %H:%M')}** · {when}")
 
-        # Memoise the (heavy) field image so a pure pan/zoom rerun doesn't rebuild
-        # it — only hour/scale/opacity changes do.
-        img_key = (id(field), idx, int(vmax), round(float(alpha), 2))
-        memo = st.session_state.get("wm_img_memo")
-        if memo and memo[0] == img_key:
-            rgba = memo[1]
-        else:
-            rgba = _field_rgba(field.frames[idx].speed_kn, vmax, alpha)
-            st.session_state["wm_img_memo"] = (img_key, rgba)
-
-        m = _build_map(field, idx, corners, vmax=vmax, alpha=alpha, arrows=arrows,
-                       rgba=rgba, owm_points=owm_points, bounds=bounds,
-                       center=st.session_state.wm_center, zoom=st.session_state.wm_zoom)
-        out = st_folium(m, key="wind_field_map", use_container_width=True, height=620,
-                        center=st.session_state.wm_center, zoom=st.session_state.wm_zoom,
-                        returned_objects=["center", "zoom"])
-        # echo the user's pan/zoom back so the next rerun keeps the same view
-        if out:
-            if out.get("center"):
-                st.session_state.wm_center = [out["center"]["lat"], out["center"]["lng"]]
-            if out.get("zoom") is not None:
-                st.session_state.wm_zoom = out["zoom"]
+        fig = build_figure(field, idx, corners, vmax=vmax, alpha=alpha, arrows=arrows,
+                           owm_points=owm_points, bounds=bounds)
+        st.plotly_chart(fig, width="stretch", key="wind_field_map")
 
     _panel()
