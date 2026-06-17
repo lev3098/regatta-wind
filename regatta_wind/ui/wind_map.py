@@ -277,22 +277,30 @@ def render_video_export(field: FineField, corners: list[Waypoint]) -> None:
     """Render the forecast to an .mp4 (smooth gradient + arrows, N s per hour)."""
     from .. import video
 
+    _RES = {"4K — для зума (3840×2160)": (3840, 2160),
+            "1080p — быстрее (1920×1080)": (1920, 1080)}
+
     with st.expander("🎬 Экспорт видео (.mp4) — анимация по часам"):
         c1, c2 = st.columns(2)
         sec = c1.slider("Секунд на час", 2, 10, 5, 1, key="vid_sec")
         fps = c2.select_slider("Плавность (FPS)", options=[8, 10, 12, 15, 24],
                                value=12, key="vid_fps")
+        res_label = st.radio("Разрешение", list(_RES), index=0, key="vid_res")
+        width, height = _RES[res_label]
         vmax = int(st.session_state.get("wm_vmax", 30))
         arrows = int(st.session_state.get("wm_arrows", 28))
         nseg = max(len(field.times) - 1, 1)
-        st.caption(f"≈ {sec * nseg + 1} с · {len(field.times)} ч · шкала {vmax} уз · "
-                   f"стрелки {arrows} · сетка {field.grid_km:g} км")
+        st.caption(f"≈ {sec * nseg + 1} с · {len(field.times)} ч · {width}×{height} · "
+                   f"шкала {vmax} уз · стрелки {arrows} · сетка {field.grid_km:g} км")
+        if width >= 3840:
+            st.caption("4K считается дольше (минуты) — зато можно зумить.")
 
         if st.button("🎬 Собрать видео", type="primary", width="stretch", key="vid_make"):
             bar = st.progress(0.0, text="Рендер кадров…")
             try:
                 st.session_state["vid_bytes"] = video.render_mp4(
                     field, corners, seconds_per_hour=sec, fps=int(fps), vmax=vmax, arrows=arrows,
+                    width=width, height=height,
                     progress=lambda d, t: bar.progress(d / t, text=f"Кадр {d}/{t}"))
             except Exception as exc:  # noqa: BLE001
                 st.error(f"Не удалось собрать видео: {exc}")

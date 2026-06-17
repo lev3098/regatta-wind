@@ -57,14 +57,18 @@ class _Canvas:
     """Static layout + reusable pieces computed once for the whole video."""
 
     def __init__(self, field: FineField, corners: list[Waypoint], vmax: float,
-                 width: int = 1120, height: int = 720):
+                 width: int = 3840, height: int = 2160):
         self.W, self.H = width, height
         self.vmax = vmax
+        s = height / 720.0  # scale every visual element relative to the 720p baseline
+        self.s = s
+        self.arrow_w = max(1, round(2 * s))
+        self.dot_r = max(2, round(3 * s))
         lat, lon = field.terrain.lat, field.terrain.lon
         self.lat_lo, self.lat_hi = float(np.min(lat)), float(np.max(lat))
         self.lon_lo, self.lon_hi = float(np.min(lon)), float(np.max(lon))
 
-        left, right, top, bot = 18, 116, 48, 18
+        left, right, top, bot = round(18 * s), round(120 * s), round(52 * s), round(20 * s)
         aw, ah = self.W - left - right, self.H - top - bot
         clat = (self.lat_lo + self.lat_hi) / 2
         aspect = ((self.lon_hi - self.lon_lo) * math.cos(math.radians(clat))) / \
@@ -90,11 +94,12 @@ class _Canvas:
             self.dark = None
 
         self.corner_px = [(w.name, self._px(w.lat, w.lon)) for w in (corners or [])]
-        self.f_time = _font(26)
-        self.f_small = _font(15)
-        self.f_tick = _font(13)
+        self.f_time = _font(round(26 * s))
+        self.f_small = _font(round(15 * s))
+        self.f_tick = _font(round(13 * s))
+        self.cbw = max(8, round(18 * s))
         self.colorbar = self._colorbar()
-        self.cb_x = self.W - right + 22
+        self.cb_x = self.W - right + round(22 * s)
 
     def _px(self, lat: float, lon: float) -> tuple[int, int]:
         x = self.fx + (lon - self.lon_lo) / (self.lon_hi - self.lon_lo) * self.fw
@@ -102,7 +107,7 @@ class _Canvas:
         return int(round(x)), int(round(y))
 
     def _colorbar(self) -> Image.Image:
-        bw, bh = 18, self.fh
+        bw, bh = self.cbw, self.fh
         col = np.zeros((bh, bw, 3), dtype=np.uint8)
         speeds = np.linspace(self.vmax, 0, bh)  # top = vmax
         rgb = _speed_to_rgb(speeds.reshape(-1, 1), self.vmax)[:, 0, :]
@@ -140,39 +145,44 @@ def _draw_arrows(draw: ImageDraw.ImageDraw, canvas: _Canvas, field: FineField,
             th = math.radians((float(direction[i, j]) + 180) % 360)  # downwind
             dx, dy = math.sin(th), -math.cos(th)
             hx, hy = x + dx * length, y + dy * length
-            draw.line([(x, y), (hx, hy)], fill=(255, 255, 255, 255), width=2)
+            draw.line([(x, y), (hx, hy)], fill=(255, 255, 255, 255), width=canvas.arrow_w)
             for da in (150, -150):
                 ba = th + math.radians(da)
                 draw.line([(hx, hy), (hx + math.sin(ba) * length * 0.36,
                                       hy - math.cos(ba) * length * 0.36)],
-                          fill=(255, 255, 255, 255), width=2)
+                          fill=(255, 255, 255, 255), width=canvas.arrow_w)
 
 
 def _render_frame(canvas: _Canvas, field: FineField, speed: np.ndarray,
                   direction: np.ndarray, when: datetime, arrows: int,
                   source: str) -> np.ndarray:
+    s = canvas.s
     im = Image.new("RGB", (canvas.W, canvas.H), _BG)
     im.paste(_field_image(canvas, speed), (canvas.fx, canvas.fy))
     draw = ImageDraw.Draw(im)
     draw.rectangle([canvas.fx, canvas.fy, canvas.fx + canvas.fw, canvas.fy + canvas.fh],
-                   outline=(70, 78, 90), width=1)
+                   outline=(70, 78, 90), width=max(1, round(s)))
     _draw_arrows(draw, canvas, field, speed, direction, arrows)
 
+    r = canvas.dot_r
     for name, (x, y) in canvas.corner_px:
-        draw.ellipse([x - 3, y - 3, x + 3, y + 3], fill=(255, 255, 255))
-        draw.text((x + 6, y - 8), name, font=canvas.f_small, fill=(235, 235, 235))
+        draw.ellipse([x - r, y - r, x + r, y + r], fill=(255, 255, 255))
+        draw.text((x + round(7 * s), y - round(9 * s)), name, font=canvas.f_small,
+                  fill=(235, 235, 235))
 
     # colour legend
     im.paste(canvas.colorbar, (canvas.cb_x, canvas.fy))
     for frac in (0.0, 0.5, 1.0):
         yy = canvas.fy + int((1 - frac) * canvas.fh)
-        draw.text((canvas.cb_x + 24, yy - 8), f"{canvas.vmax * frac:.0f}",
-                  font=canvas.f_tick, fill=(220, 220, 220))
-    draw.text((canvas.cb_x, canvas.fy - 22), "узлы", font=canvas.f_tick, fill=(220, 220, 220))
+        draw.text((canvas.cb_x + canvas.cbw + round(6 * s), yy - round(8 * s)),
+                  f"{canvas.vmax * frac:.0f}", font=canvas.f_tick, fill=(220, 220, 220))
+    draw.text((canvas.cb_x, canvas.fy - round(22 * s)), "узлы", font=canvas.f_tick,
+              fill=(220, 220, 220))
 
-    draw.text((canvas.fx, 12), when.strftime("%d.%m %H:%M"), font=canvas.f_time,
+    draw.text((canvas.fx, round(12 * s)), when.strftime("%d.%m %H:%M"), font=canvas.f_time,
               fill=(255, 255, 255))
-    draw.text((canvas.fx + 200, 20), source, font=canvas.f_small, fill=(170, 178, 190))
+    draw.text((canvas.fx + round(220 * s), round(20 * s)), source, font=canvas.f_small,
+              fill=(170, 178, 190))
     return np.asarray(im)
 
 
@@ -207,15 +217,17 @@ def render_mp4(
     fps: int = 12,
     vmax: float = 30.0,
     arrows: int = 28,
+    width: int = 3840,
+    height: int = 2160,
     progress: Callable[[int, int], None] | None = None,
 ) -> bytes:
-    """Render the forecast to an .mp4 and return its bytes."""
+    """Render the forecast to an .mp4 and return its bytes (default 4K UHD)."""
     import imageio.v2 as imageio  # local import: optional dependency
 
     if not field.frames:
         raise ValueError("Нет кадров прогноза для видео.")
 
-    canvas = _Canvas(field, corners or [], vmax)
+    canvas = _Canvas(field, corners or [], vmax, width=width, height=height)
     specs = _interp_specs(field, fps, seconds_per_hour)
     total = len(specs)
 
