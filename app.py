@@ -168,5 +168,6 @@ if correct_obs and obs_points:
 tab_map, tab_charts = st.tabs(["🗺 Карта ветра", "📈 Графики по точкам"])
 with tab_map:
     wind_map.render(field, corners, owm_points=owm_points, bounds=bounds)
+    wind_map.render_video_export(field, corners)
 with tab_charts:
     charts.render(field, corners, cfg)

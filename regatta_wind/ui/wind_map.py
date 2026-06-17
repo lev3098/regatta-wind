@@ -271,3 +271,36 @@ def render(
         st.plotly_chart(fig, width="stretch", key="wind_field_map")
 
     _panel()
+
+
+def render_video_export(field: FineField, corners: list[Waypoint]) -> None:
+    """Render the forecast to an .mp4 (smooth gradient + arrows, N s per hour)."""
+    from .. import video
+
+    with st.expander("🎬 Экспорт видео (.mp4) — анимация по часам"):
+        c1, c2 = st.columns(2)
+        sec = c1.slider("Секунд на час", 2, 10, 5, 1, key="vid_sec")
+        fps = c2.select_slider("Плавность (FPS)", options=[8, 10, 12, 15, 24],
+                               value=12, key="vid_fps")
+        vmax = int(st.session_state.get("wm_vmax", 30))
+        arrows = int(st.session_state.get("wm_arrows", 28))
+        nseg = max(len(field.times) - 1, 1)
+        st.caption(f"≈ {sec * nseg + 1} с · {len(field.times)} ч · шкала {vmax} уз · "
+                   f"стрелки {arrows} · сетка {field.grid_km:g} км")
+
+        if st.button("🎬 Собрать видео", type="primary", width="stretch", key="vid_make"):
+            bar = st.progress(0.0, text="Рендер кадров…")
+            try:
+                st.session_state["vid_bytes"] = video.render_mp4(
+                    field, corners, seconds_per_hour=sec, fps=int(fps), vmax=vmax, arrows=arrows,
+                    progress=lambda d, t: bar.progress(d / t, text=f"Кадр {d}/{t}"))
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"Не удалось собрать видео: {exc}")
+            finally:
+                bar.empty()
+
+        data = st.session_state.get("vid_bytes")
+        if data:
+            st.download_button("⬇ Скачать .mp4", data, file_name="regatta_wind.mp4",
+                               mime="video/mp4", width="stretch", key="vid_dl")
+            st.video(data)
