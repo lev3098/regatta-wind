@@ -83,6 +83,12 @@ class _Canvas:
         self.fx = left + (aw - self.fw) // 2
         self.fy = top + (ah - self.fh) // 2
 
+        # blur tied to one grid cell (not to resolution) so the gradient stays
+        # crisp at 4K instead of mushy — just enough to melt cell facets.
+        self.ny, self.nx = int(lat.shape[0]), int(lat.shape[1])
+        self.cell_px = self.fw / max(self.nx - 1, 1)
+        self.blur_px = max(0.6, self.cell_px * 0.32)
+
         # land dimming mask (north-up), resized to the field rect
         land = field.terrain.is_land
         if land is not None and np.any(land) and not np.all(land):
@@ -116,12 +122,16 @@ class _Canvas:
 
 
 def _field_image(canvas: _Canvas, speed: np.ndarray) -> Image.Image:
-    """Smooth gradient image for one (interpolated) frame, sized to the field rect."""
+    """Crisp smooth gradient for one (interpolated) frame, sized to the field rect.
+
+    The speed field is upscaled in DATA space (bicubic) before colour-mapping, then
+    given a light sub-cell blur — this keeps the gradient sharp at high resolution.
+    """
     fill = float(np.nanmean(speed)) if np.isfinite(speed).any() else 0.0
-    filled = np.where(np.isfinite(speed), speed, fill)
-    rgb = _speed_to_rgb(filled, canvas.vmax)
-    img = Image.fromarray(np.flipud(rgb), mode="RGB").resize((canvas.fw, canvas.fh), Image.BICUBIC)
-    img = img.filter(ImageFilter.GaussianBlur(radius=max(1.0, canvas.fw / 140)))
+    filled = np.where(np.isfinite(speed), speed, fill).astype(np.float32)
+    sp = Image.fromarray(np.flipud(filled), mode="F").resize((canvas.fw, canvas.fh), Image.BICUBIC)
+    rgb = _speed_to_rgb(np.asarray(sp), canvas.vmax)
+    img = Image.fromarray(rgb, mode="RGB").filter(ImageFilter.GaussianBlur(radius=canvas.blur_px))
     if canvas.land_mask is not None:
         img = Image.composite(canvas.dark, img, canvas.land_mask)
     return img
