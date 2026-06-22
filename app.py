@@ -130,6 +130,10 @@ if field is None:
                "панели или переключи источник на «Open-Meteo (фолбэк)».")
     st.stop()
 
+# Raw, full-horizon, un-smoothed field straight from the source — what the router
+# export writes (before the display trims to "now" and nudges toward observations).
+raw_field = field
+
 # Drop hours already in the past — show now → end only.
 field = field.since(datetime.now(ZoneInfo(cfg.timezone)))
 
@@ -169,5 +173,6 @@ tab_map, tab_charts = st.tabs(["🗺 Карта ветра", "📈 График�
 with tab_map:
     wind_map.render(field, corners, owm_points=owm_points, bounds=bounds)
     wind_map.render_video_export(field, corners)
+    wind_map.render_data_export(raw_field)
 with tab_charts:
     charts.render(field, corners, cfg)

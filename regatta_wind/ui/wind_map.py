@@ -312,3 +312,37 @@ def render_video_export(field: FineField, corners: list[Waypoint]) -> None:
             st.download_button("⬇ Скачать .mp4", data, file_name="regatta_wind.mp4",
                                mime="video/mp4", width="stretch", key="vid_dl")
             st.video(data)
+
+
+def render_data_export(field: FineField) -> None:
+    """Export the raw field to CF-NetCDF (10 m U/V, m/s) for the external router."""
+    import os
+    import tempfile
+
+    from .. import wind_export
+
+    with st.expander("📦 Данные для роутера (CF-NetCDF)"):
+        st.caption("Сырое поле ветра на нативной сетке (10 м U/V, м/с, время в UTC) — "
+                   "без сглаживания, для построения маршрута во внешнем роутере.")
+        if st.button("Сформировать .nc", type="primary", width="stretch", key="nc_make"):
+            try:
+                tmp = tempfile.mkdtemp()
+                path = wind_export.export_wind_field(field, tmp, field.times[0])
+                name = os.path.basename(path)
+                with open(path, "rb") as fh:
+                    st.session_state["nc_bytes"] = fh.read()
+                with open(path[:-3] + ".json", "rb") as fh:
+                    st.session_state["nc_manifest"] = fh.read()
+                st.session_state["nc_name"] = name
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"Не удалось сформировать NetCDF: {exc}")
+
+        name = st.session_state.get("nc_name")
+        if name and st.session_state.get("nc_bytes"):
+            st.caption(f"Готово: **{name}** ({len(st.session_state['nc_bytes']) // 1024} КБ) "
+                       f"· горизонт {len(field.times)} ч от {field.times[0]:%d.%m %H:%M}")
+            st.download_button("⬇ NetCDF (.nc)", st.session_state["nc_bytes"], file_name=name,
+                               mime="application/x-netcdf", width="stretch", key="nc_dl")
+            st.download_button("⬇ Манифест (.json)", st.session_state["nc_manifest"],
+                               file_name=name[:-3] + ".json", mime="application/json",
+                               width="stretch", key="nc_dl_json")
