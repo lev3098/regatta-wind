@@ -18,3 +18,6 @@ wrf/.compute*
 wrfout_*
 met_em*
 geo_em*
+
+# wind_export output (generated .nc/.json)
+export/

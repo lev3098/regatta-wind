@@ -3,6 +3,8 @@ rich>=13.0
 pyyaml>=6.0
 numpy>=1.26
 netCDF4>=1.6
+xarray>=2024.1           # экспорт сырого поля ветра в CF-NetCDF (wind_export)
+# eccodes + cfgrib       # опционально: запись GRIB2 для qtVlm/Expedition (TODO)
 tzdata>=2024.1            # zoneinfo на Windows (нет системной базы TZ)
 streamlit>=1.35
 plotly>=5.20             # карта ветра + графики по точкам
