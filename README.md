@@ -54,15 +54,25 @@ pip install -r requirements.txt
 ## Запуск
 
 ```bash
+cd regatta-wind
 ./run.sh                       # удобный запуск (venv + streamlit)
-# или вручную:
-streamlit run app.py           # если venv активирован
-.venv/bin/streamlit run app.py # без активации venv
 ```
 
-Откроется на **http://localhost:8501** (Streamlit сам предложит ссылку в консоли).
-Пока WRF не посчитан — показывается помеченный фолбэк Open-Meteo (коррекция по факту
-работает и для него). Консоль:
+Альтернативно вручную:
+
+```bash
+.venv/bin/streamlit run app.py            # без активации venv
+# или, если venv активирован (source .venv/bin/activate):
+streamlit run app.py
+```
+
+**Открыть в браузере:**
+- на этом же компьютере → **http://localhost:8501**
+- с телефона/другого ноутбука в той же сети → `http://<IP-компа>:8501`
+  (узнать IP на macOS: `ipconfig getifaddr en0`; например `http://192.168.1.116:8501`).
+
+Остановить сервер — `Ctrl+C` в терминале. Пока WRF не посчитан — показывается помеченный
+фолбэк Open-Meteo (коррекция по факту работает и для него). Консоль:
 
 ```bash
 python -m regatta_wind --route config/route.yaml      # auto: WRF, иначе фолбэк
